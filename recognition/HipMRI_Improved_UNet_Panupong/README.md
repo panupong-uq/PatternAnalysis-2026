@@ -7,8 +7,32 @@ COMP3710 individual project: compare a standard 2D U-Net baseline with the cours
 - Project planning and the initial feasibility review have been prepared.
 - VS Code execution through Google Colab was verified using PyTorch CUDA tensor arithmetic on a Tesla T4.
 - Independent online research identified **stored value 5 as Prostate** in the official CSIRO dataset documentation. All 60 processed masks for Case 006 / Week 0 preserve the original numeric labels in a direct array comparison. This finding was not obtained from or confirmed by a tutor; other series have not been individually matched to original 3D masks.
-- `dataset.py`, `modules.py`, `metrics.py` and `train.py` are implemented. The data pipeline was checked on CPU against the full dataset audit. The models were checked with random tensors only (output shapes, gradients, loss range).
-- Both models completed short real-data timing runs on a Colab Tesla T4 (100 training batches each, followed by validation). Full training and final test evaluation are still pending.
+- `dataset.py`, `modules.py`, `metrics.py` and `train.py` are implemented. The data pipeline was checked on CPU against the full dataset audit. The models were first checked with random tensors (output shapes, gradients, loss range) and then in short real-data timing runs (below).
+- Both models completed short real-data timing runs on a Colab Tesla T4 (100 training batches each, followed by validation). These remain timing evidence only.
+- Final training has moved to the UQ Rangpur cluster, where both models will be trained on the same GPU type (the interactive check ran on an NVIDIA A100-PCIE-40GB). The GPU each training job used will be confirmed from its Slurm log. The data pipeline passed its full check on Rangpur. Both 40-epoch training jobs have been submitted; no Rangpur training results exist yet, and final test evaluation is still pending.
+
+## Progress update: Rangpur setup and data check (22 October 2026)
+
+The assignment directs compute-intensive work to the Rangpur Slurm cluster, which also hosts the 2D data at `/home/groups/comp3710/HipMRI_Study_open/keras_slices_data`. Rangpur is now the platform for the final results of both models. The user supplied the Rangpur console outputs for this update.
+
+**Environment** (interactive Slurm session on node `a100-6`, code at commit `92f51d4`):
+
+- NVIDIA A100-PCIE-40GB, driver 590.48.01 (CUDA 13.1).
+- Python 3.12.13 and PyTorch 2.13.0+cu130; a test operation on the GPU succeeded.
+
+**Data pipeline check** (`python dataset.py` on the course copy of the data, 95 s):
+
+| Split | Pairs | Cases | Series | Prostate-positive slices |
+| --- | ---: | ---: | ---: | ---: |
+| Train | 11,460 | 31 | 191 | 4,152 |
+| Validation | 660 | 4 | 11 | 254 |
+| Test | 540 | 3 | 9 | 195 |
+
+- Every item of every split passed the shape, range and one-hot checks.
+- The 60 training slices from Case 019 / Week 1 were cropped.
+- Per-class pixel counts match the earlier full-dataset audit of the local copy, with one expected difference. The training Background, Body and Bones counts are lower by 245,760 pixels in total, which is exactly the cropped area (60 slices x 256 x 16 columns). Bladder, rectum and prostate pixels are unchanged, so the Rangpur copy and the audited copy agree on these summaries.
+
+**Status:** both models were submitted as Slurm jobs (one GPU each) with the default settings: 40 epochs, batch size 16, AMP, seed 42. The jobs do not evaluate the test split. No training results are reported yet.
 
 ## Progress update: Colab T4 timing runs (21 October 2026)
 
@@ -32,6 +56,8 @@ These are timing experiments, not completed full-training results or a final mod
 
 Next: train both models from scratch for 40 full epochs each on Colab T4, using separate output directories from the timing runs. Full-run completion has not yet been reported. Inspect the completed training histories before the final test evaluation.
 
+(Superseded on 22 October 2026: final training moved to Rangpur, as described above.)
+
 ## Progress update: prostate label provenance (21 October 2026)
 
 The dataset publisher's [BriefDataDescription.txt](https://data.csiro.au/dap/ws/v2/collections/52549/support/5034), attached to the [CSIRO collection](https://doi.org/10.25919/45t8-p065), explicitly defines `0=Background`, `1=Body`, `2=Bones`, `3=Bladder`, `4=Rectum`, and **`5=Prostate`**.
@@ -50,16 +76,16 @@ This README is still a progress document. It will become the full report once ve
 
 ## Dependencies
 
-These are the versions the code was checked with locally. Each training run also records its own versions in `config.json`.
+These are the versions the code was checked with locally and the versions installed on Rangpur. Each training run also records its Python and PyTorch versions in `config.json`.
 
-| Package | Version |
-| --- | --- |
-| Python | 3.12.13 |
-| PyTorch | 2.13.0 (CUDA 13.0 build) |
-| torchvision | 0.28.0 |
-| NumPy | 2.5.2 |
-| nibabel | 5.4.2 |
-| matplotlib | 3.11.1 |
+| Package | Local check | Rangpur |
+| --- | --- | --- |
+| Python | 3.12.13 | 3.12.13 |
+| PyTorch | 2.13.0 (CUDA 13.0 build) | 2.13.0+cu130 |
+| torchvision | 0.28.0 | 0.28.0+cu130 |
+| NumPy | 2.5.2 | 2.5.1 |
+| nibabel | 5.4.2 | 5.4.2 |
+| matplotlib | 3.11.1 | 3.11.2 |
 
 ## Usage
 
@@ -70,6 +96,12 @@ pip install nibabel==5.4.2              # torch/torchvision/matplotlib are prein
 python dataset.py --data-root keras_slices_data                      # pipeline self-check
 python train.py --model unet --epochs 1 --max-train-batches 100      # timing run, no test
 python train.py --model improved --epochs 40 --out-dir runs/improved --test
+```
+
+On Rangpur, `train.py` runs inside a Slurm job (`--partition=comp3710 --account=comp3710 --gres=gpu:1`) and reads the course copy of the data directly:
+
+```bash
+python train.py --model improved --data-root /home/groups/comp3710/HipMRI_Study_open/keras_slices_data --out-dir ~/hipmri_runs/improved
 ```
 
 The test split is evaluated only with `--test`, after the full epoch budget. It is evaluated once for the best-validation checkpoint and once for the last checkpoint. Shortened runs refuse `--test`, and existing test results are never overwritten.
@@ -118,6 +150,7 @@ AI assistance (Anthropic Claude, through Claude Code) was used for the following
 - preparing and executing the mask-comparison and dataset-audit code;
 - drafting the data/metric policy;
 - drafting `dataset.py`, `modules.py`, `metrics.py` and `train.py`;
+- preparing the Rangpur environment-setup and Slurm job scripts (kept outside this repository);
 - drafting this documentation.
 
 The AI-suggested code was verified in four ways:
