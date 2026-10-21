@@ -6,9 +6,31 @@ COMP3710 individual project: compare a standard 2D U-Net baseline with the cours
 
 - Project planning and the initial feasibility review have been prepared.
 - VS Code execution through Google Colab was verified using PyTorch CUDA tensor arithmetic on a Tesla T4.
-- Independent online research identified **stored value 5 as Prostate** in the official CSIRO dataset documentation. All 60 processed masks for Case 006 / Week 0 preserve the original numeric labels in a direct array comparison. This finding was not obtained from or confirmed by a tutor; other series still require the planned dataset audit.
+- Independent online research identified **stored value 5 as Prostate** in the official CSIRO dataset documentation. All 60 processed masks for Case 006 / Week 0 preserve the original numeric labels in a direct array comparison. This finding was not obtained from or confirmed by a tutor; other series have not been individually matched to original 3D masks.
 - `dataset.py`, `modules.py`, `metrics.py` and `train.py` are implemented. The data pipeline was checked on CPU against the full dataset audit. The models were checked with random tensors only (output shapes, gradients, loss range).
-- **No model has been trained yet and no segmentation result is reported.** The first step is a short timing run on a Colab T4 to size the training budget.
+- Both models completed short real-data timing runs on a Colab Tesla T4 (100 training batches each, followed by validation). Full training and final test evaluation are still pending.
+
+## Progress update: Colab T4 timing runs (21 October 2026)
+
+The user supplied the Colab console outputs for the pipeline checks and timing runs below. The underlying run artifacts have not been independently inspected for this update.
+
+- All 11,460 training, 660 validation and 540 test image-mask pairs passed the pipeline's shape, range and one-hot checks on Colab. Case counts were 31 / 4 / 3, and series counts were 191 / 11 / 9. The expected 60 training slices from Case 019 / Week 1 were cropped.
+- Runtime: Linux, Python 3.13.15, PyTorch 2.11.0+cu130, CUDA available, Tesla T4 with 15,360 MiB. Both timing runs used batch size 16, AMP, seed 42 and 100 training batches, followed by one complete validation pass. A full training epoch contains 716 batches.
+
+| Timing measurement | Baseline U-Net | Improved U-Net |
+| --- | ---: | ---: |
+| Parameters | 31,036,806 | 3,189,282 |
+| Training time for 100 batches | 27 s | 16 s |
+| Validation time (rounded) | 3 s | 2 s |
+| Steady-state seconds per training batch | 0.187 | 0.082 |
+| Estimated full epoch | 137 s | 61 s |
+| Estimated 40-epoch training time | 1.5 h | 0.7 h |
+| Peak allocated GPU memory | 4.85 GiB | 0.92 GiB |
+| Validation prostate Dice after short run | 0.0000 | 0.5839 |
+
+These are timing experiments, not completed full-training results or a final model comparison. The Dice values are the mean per-series 3D prostate Dice on validation after only 100 training batches. No model evaluation on the test split was performed (`test=false`); the test pipeline checks above only validate data integrity. Timing estimates exclude checkpoint/plot saving and other overhead and may vary across runs.
+
+Next: train both models from scratch for 40 full epochs each on Colab T4, using separate output directories from the timing runs. Full-run completion has not yet been reported. Inspect the completed training histories before the final test evaluation.
 
 ## Progress update: prostate label provenance (21 October 2026)
 
@@ -105,4 +127,4 @@ The AI-suggested code was verified in four ways:
 - comparing the metrics with an independent NumPy reference on synthetic data;
 - running synthetic end-to-end training/resume/test checks on CPU.
 
-No model training or segmentation performance result is reported yet.
+OpenAI Codex also assisted with the Colab execution guidance and this progress update, using the console outputs supplied by the user. Only short timing-run training is reported so far; full-training and final test results remain pending.
