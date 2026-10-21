@@ -9,7 +9,41 @@ COMP3710 individual project: compare a standard 2D U-Net baseline with the cours
 - Independent online research identified **stored value 5 as Prostate** in the official CSIRO dataset documentation. All 60 processed masks for Case 006 / Week 0 preserve the original numeric labels in a direct array comparison. This finding was not obtained from or confirmed by a tutor; other series have not been individually matched to original 3D masks.
 - `dataset.py`, `modules.py`, `metrics.py` and `train.py` are implemented. The data pipeline was checked on CPU against the full dataset audit. The models were first checked with random tensors (output shapes, gradients, loss range) and then in short real-data timing runs (below).
 - Both models completed short real-data timing runs on a Colab Tesla T4 (100 training batches each, followed by validation). These remain timing evidence only.
-- Final training has moved to the UQ Rangpur cluster, where both models will be trained on the same GPU type (the interactive check ran on an NVIDIA A100-PCIE-40GB). The GPU each training job used will be confirmed from its Slurm log. The data pipeline passed its full check on Rangpur. Both 40-epoch training jobs have been submitted; no Rangpur training results exist yet, and final test evaluation is still pending.
+- Final training moved to the UQ Rangpur cluster. The data pipeline passed its full check there.
+- Both models completed 40 epochs of training on the same Rangpur node (NVIDIA A100-PCIE-40GB). Validation results are below.
+- The one-time test evaluation of both models has been submitted, and its results are still pending.
+
+## Progress update: Rangpur training complete (22 October 2026)
+
+Both models were trained from scratch on Rangpur node `a100-6` (NVIDIA A100-PCIE-40GB), with code at commit `92f51d4`. Both used the same settings: 40 epochs, batch size 16, AMP and seed 42. The values below come from each run's `history.json` and `config.json` and from the Slurm logs. The user copied these files back from Rangpur. **All Dice values in this section are on the validation split. No test result is reported here.**
+
+| Measurement | Baseline U-Net | Improved U-Net |
+| --- | ---: | ---: |
+| Parameters | 31,036,806 | 3,189,282 |
+| Median training time per epoch | 29.0 s | 24.0 s |
+| Median seconds per training batch (steady state) | 0.040 | 0.033 |
+| Peak allocated GPU memory | 2.32 GiB | 0.96 GiB |
+| Training + validation time, 40 epochs | 20.4 min | 17.1 min |
+| Job time, script start to finish (from the log) | 28 min 57 s | 19 min 13 s |
+| Best validation prostate Dice, per-series mean (epoch) | **0.8686** (28) | **0.8564** (34) |
+| At that epoch: case-weighted / global prostate Dice | 0.8331 / 0.8697 | 0.8157 / 0.8534 |
+| At that epoch: foreground Dice (classes 1-5) | 0.9202 | 0.9200 |
+| Last epoch (40): validation prostate Dice | 0.8626 | 0.8556 |
+| Last 10 epochs: mean ± SD validation prostate Dice | 0.8628 ± 0.0018 | 0.8548 ± 0.0013 |
+
+The job time also includes one-time dataset loading and the per-epoch checkpoint, history and plot saving. Most of the larger baseline overhead is probably from writing its larger checkpoints: about 0.5 GB per epoch, against about 0.05 GB for Improved. This overhead was not timed separately.
+
+Observations, to be revisited with the test results:
+
+- **Accuracy:** on validation, the baseline's prostate Dice is slightly higher. The gap is about 0.012 at the best epoch and 0.008 over the last 10 epochs. The foreground Dice over classes 1-5 (body, bones, bladder, rectum and prostate) is nearly identical: 0.9202 against 0.9200 at the best epoch.
+- **Cost:** the Improved U-Net uses about 10 times fewer parameters, about 17% less time per training batch and about 60% less peak GPU memory.
+- **Caveats:**
+  - Validation has only 11 series from 4 cases, and each model was trained with a single seed, so these gaps have not been tested for significance.
+  - The best epoch was chosen on the same validation split, so the best-epoch scores are optimistic.
+- **Training curves:** validation loss levels off after about 10-15 epochs, while training loss keeps decreasing (about -0.95 against -0.78 for validation). There is no late drop in validation Dice.
+- **Fallback rule:** the pre-specified rule for switching to Dice plus cross-entropy was not triggered. It applied if training loss fell by less than 10% between epochs 1 and 5, or if validation prostate Dice was below 0.3 at epoch 5. Training loss fell by 18.7% for the baseline and 14.6% for Improved, and epoch-5 validation Dice was 0.853 and 0.838.
+
+**Next:** each model's best-validation and last checkpoints are evaluated once on the test split (`--resume --test`). Nothing will be tuned after the test results are seen.
 
 ## Progress update: Rangpur setup and data check (22 October 2026)
 
@@ -33,6 +67,8 @@ The assignment directs compute-intensive work to the Rangpur Slurm cluster, whic
 - Per-class pixel counts match the earlier full-dataset audit of the local copy, with one expected difference. The training Background, Body and Bones counts are lower by 245,760 pixels in total, which is exactly the cropped area (60 slices x 256 x 16 columns). Bladder, rectum and prostate pixels are unchanged, so the Rangpur copy and the audited copy agree on these summaries.
 
 **Status:** both models were submitted as Slurm jobs (one GPU each) with the default settings: 40 epochs, batch size 16, AMP, seed 42. The jobs do not evaluate the test split. No training results are reported yet.
+
+(Updated on 22 October 2026: both training jobs completed, as described above.)
 
 ## Progress update: Colab T4 timing runs (21 October 2026)
 
@@ -160,4 +196,4 @@ The AI-suggested code was verified in four ways:
 - comparing the metrics with an independent NumPy reference on synthetic data;
 - running synthetic end-to-end training/resume/test checks on CPU.
 
-OpenAI Codex also assisted with the Colab execution guidance and this progress update, using the console outputs supplied by the user. Only short timing-run training is reported so far; full-training and final test results remain pending.
+OpenAI Codex also assisted with the Colab execution guidance and this progress update, using the console outputs supplied by the user. Claude Code summarised the Rangpur run files supplied by the user for the training update. The short timing runs and the full 40-epoch training (validation only) are reported; final test results remain pending.
