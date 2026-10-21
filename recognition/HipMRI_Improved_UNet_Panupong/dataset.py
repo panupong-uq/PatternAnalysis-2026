@@ -329,7 +329,9 @@ def make_dataloaders(data_root, batch_size=16, num_workers=None, seed=42, cache=
 
     ``num_workers=None`` picks 0 on Windows (workers there would each copy
     the cached data) and 2 elsewhere, e.g. on Colab. Use the same value for
-    both models so they see the same augmentation stream.
+    both models so they see the same augmentation stream. Workers are not
+    persistent, so reseeding the training generator before an epoch (as
+    ``train.py`` does) fixes that epoch's order and augmentation.
     """
     if batch_size < 8:
         raise ValueError("batch_size must be at least 8 (see the data policy)")
@@ -349,8 +351,7 @@ def make_dataloaders(data_root, batch_size=16, num_workers=None, seed=42, cache=
         name: DataLoader(dataset, batch_size=batch_size, shuffle=(name == "train"),
                          drop_last=(name == "train"),
                          num_workers=num_workers, pin_memory=torch.cuda.is_available(),
-                         generator=generator if name == "train" else None,
-                         persistent_workers=(name == "train" and num_workers > 0))
+                         generator=generator if name == "train" else None)
         for name, dataset in datasets.items()
     }
     return loaders
