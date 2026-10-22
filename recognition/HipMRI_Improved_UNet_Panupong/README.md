@@ -13,6 +13,7 @@ COMP3710 individual project: compare a standard 2D U-Net baseline with the cours
 - Both models completed 40 epochs of training on the same Rangpur node (NVIDIA A100-PCIE-40GB). Validation results are below.
 - Both models were tested once on the test split, using the best-validation and last checkpoints fixed before training. **Both exceed the target prostate test Dice of 0.75** (results below).
 - `predict.py` was run on Rangpur. It reproduced the test Dice of both models and produced the prediction figures, failure cases and inference times below.
+- A boundary analysis (HD95, results by position in the gland, and leakage into neighbouring organs) addresses the HipMRI open research dilemma for the two 2D models (3D context was not tested) and leads to an engineering recommendation (below).
 
 ## Feasibility review (compulsory check-off document)
 
@@ -59,14 +60,76 @@ Main risks are unknown prostate mapping, class imbalance, ambiguous boundaries, 
 | 1. Data integrity | Met, with limits. The supplied splits were kept, and filename case IDs are disjoint across splits (31 / 4 / 3 cases). A full audit read all 12,660 image-mask pairs and found them readable, with matching shapes and affines. Label 5 = prostate was confirmed from the dataset publisher's documentation and a direct check of one series ([LABEL_MAPPING.md](LABEL_MAPPING.md)); this was found by independent research, not confirmed by the tutor. Patient identity beyond the filename case IDs cannot be verified. |
 | 2. Accuracy | Met. Test prostate Dice (per-series 3D mean) is 0.8858 for the baseline and 0.8738 for the Improved U-Net. Per-class Dice/IoU are reported, and the aggregation and empty-mask rules were fixed before training. |
 | 3. Fair comparison | Met. Both models used the same splits, preprocessing, loss, optimiser, 40-epoch budget, seed and GPU type. Checkpoints were chosen on validation only. Test metrics were computed once; the later `predict.py` runs only reproduce them, draw figures and add analysis, with nothing selected or tuned. |
-| 4. Failure analysis | Largely met. Five failure cases are shown, and small targets at the ends of the gland are identified as the recurring limitation. The Improved U-Net predicts no prostate on these slices, so all their prostate pixels are missed. Extra prostate pixels are reported only as false-positive slice counts, and annotation uncertainty was not assessed. The spacing has no known units and the physical orientation cannot be verified, so the condition for naming base or apex is not met; the cases are described as the two ends of the prostate's slice range instead. |
+| 4. Failure analysis | Largely met. Five failure cases are shown, and small targets at the ends of the gland are identified as the recurring limitation. The Improved U-Net predicts no prostate on these slices, so all their prostate pixels are missed. Missed and extra prostate pixels are quantified by class, with HD95 and results by distance from the ends of the gland, in the boundary-analysis section. Annotation uncertainty was not assessed. The spacing has no known units and the physical orientation cannot be verified, so the condition for naming base or apex is not met; the cases are described as the two ends of the prostate's slice range instead. |
 | 5. Resources | Met. Peak training memory was 2.32 GiB (baseline) and 0.96 GiB (Improved) on the A100, and 4.85 / 0.92 GiB in the Colab T4 timing runs, all below 12 GiB. Parameter counts and inference times were measured. |
 
 Changes from the plan:
 
 - **Platform:** final training moved from Colab T4 to the course's Rangpur cluster (A100). Training plus validation took 20.4 min (baseline) and 17.1 min (Improved) for 40 epochs. The job wall times were 29 and 19 min, well inside the 6 GPU-hour budget.
 - **Risks resolved:** the prostate label mapping was resolved from the publisher's documentation. The pre-specified switch to a Dice plus cross-entropy loss was not needed, and the Improved U-Net was feasible, so the Easy-level fallback was not used.
-- **Open question:** the review asks whether the Improved U-Net reduces missed tissue and boundary leakage enough to justify its cost. Missed tissue and computational cost are reported in the results sections below. A boundary analysis (HD95 and prostate pixels predicted in the rectum or bladder) has been added to `predict.py`, but its results are not reported yet, so the final recommendation is still pending.
+- **Open question:** the review asks whether the Improved U-Net reduces missed tissue and boundary leakage enough to justify its cost. It does not reduce missed tissue: it misses the prostate on 22 slices against 17, all near the ends of the gland. Leakage into the rectum or bladder is below 1% for both models. The Improved U-Net is also cheaper, not more expensive, except for single-slice latency, so the expected trade-off does not arise. Details and the recommendation are in the boundary-analysis section below.
+
+## Progress update: boundary analysis and the open research dilemma (22 October 2026)
+
+The HipMRI dilemma in the assignment asks whether a good global Dice hides failures at the base and apex slices, or leakage into the rectum or bladder. It also asks whether more spatial context removes these errors or only improves easy central slices. To answer this for the two 2D models, a boundary analysis was added to `predict.py`. It was run on Rangpur as job 685882 (node `a100-8`, NVIDIA A100-PCIE-40GB, code at commit `65b1b63`, 1 min 5 s) with the same validation-selected checkpoints. The user ran the job and copied the outputs back.
+
+The run reproduced the saved test Dice (0.8858 and 0.8738) and the same five failure cases. Its comparison and failure figures are byte-identical to those of job 685612, so the displayed slices were predicted identically. Elsewhere in the test split a few pixels differed: the recomputed baseline Dice differs from job 685612 in the sixth decimal place, which is consistent with non-deterministic GPU arithmetic. Its inference times differed from job 685612 by at most about 4%. The inference table in the predictions section below keeps the job 685612 values, and the boundary results here come from job 685882.
+
+**Method.** HD95 is in pixels and position in the gland is counted in slices, because the NIfTI spacing ([1, 1]) has no known units.
+
+- **HD95 per slice:** the 95th-percentile Hausdorff distance between the predicted and ground-truth prostate boundaries. It is computed on every test slice where both contain prostate.
+- **Position in the gland:** each prostate slice is grouped by its distance, in slices, from the nearest end of its series' prostate slice range: 0, 1, 2, or 3 and more. The two ends cannot be labelled base or apex, because the physical orientation of the slices is not verifiable.
+- **Leakage:** the true classes of all predicted prostate pixels, and the predicted classes of all true prostate pixels, over the whole test split.
+
+**Results by position in the gland** (195 test slices with prostate; 9 series, so 18 slices at each distance 0, 1 and 2):
+
+| Slices from the nearest end | Slices | Mean slice Dice (baseline / Improved) | Slices with no prostate predicted (baseline / Improved) | Median HD95 in px (baseline / Improved) |
+| --- | ---: | --- | --- | --- |
+| 0 (end slice) | 18 | 0.154 / 0.156 | 12 / 12 | 4.00 / 4.24 |
+| 1 | 18 | 0.457 / 0.308 | 5 / 8 | 3.00 / 4.33 |
+| 2 | 18 | 0.754 / 0.655 | 0 / 2 | 2.02 / 3.00 |
+| 3 or more (central) | 141 | 0.899 / 0.887 | 0 / 0 | 2.00 / 2.17 |
+| All prostate slices | 195 | 0.776 / 0.745 | 17 / 22 | 2.06 / 2.24 |
+
+HD95 is defined only on slices where a prostate was predicted. For example, at distance 0 it covers 6 of the 18 slices for each model.
+
+**Leakage** (prostate pixels pooled over all 540 test slices; each block sums to 100%):
+
+| Measurement | Baseline U-Net | Improved U-Net |
+| --- | ---: | ---: |
+| Predicted prostate pixels that are truly prostate | 88.8% | 88.1% |
+| ... that are truly body tissue | 10.3% | 11.2% |
+| ... that are truly bladder | 0.85% | 0.73% |
+| ... that are truly rectum | 0.07% | 0.00% |
+| True prostate pixels predicted as prostate | 87.7% | 86.5% |
+| ... predicted as body tissue | 11.8% | 13.1% |
+| ... predicted as rectum | 0.45% | 0.23% |
+| ... predicted as bladder | 0.02% | 0.14% |
+
+**Findings.**
+
+- **Global Dice hides the end-slice failures.** On the 141 central slices, both models reach a mean slice Dice of about 0.89-0.90, never miss the prostate, and have a median HD95 of about 2 pixels. On the 18 end slices, the mean slice Dice is about 0.15, and both models miss the prostate entirely on 12 of them. Every slice where the prostate is missed lies within 2 slices of an end of the gland. These slices hold few prostate pixels, so they barely lower the per-series 3D Dice (0.87-0.89). This is the failure mode described in the dilemma.
+- **Neither 2D model fixes the ends, and the Improved U-Net does not help there.** It is about equal to the baseline on the end slice and worse one and two slices in: mean Dice 0.31 against 0.46 and 0.66 against 0.75, with 8 against 5 and 2 against 0 missed slices. On central slices the two models are almost the same.
+  - This is not a test of more spatial context. Both models see the same single slice and both downsample four times. The Improved U-Net changes several things at once: residual context modules, deep supervision, instance normalisation, leaky ReLU and about 10 times fewer parameters. So the result cannot say which change causes the near-end gap.
+  - Each group has only 18 slices from 3 patients (14 of them from case 040), and each model was trained once. The near-end gap is an observation, not a tested difference.
+- **Leakage into the rectum and bladder is very small overall.** Pooled over all test slices, less than 1% of predicted prostate pixels are truly bladder or rectum for either model. Less than 0.5% of true prostate pixels are given to the rectum or bladder.
+  - Most misclassified prostate pixels involve the surrounding body tissue. About 10-11% of predicted prostate pixels are truly body, and 12-13% of true prostate pixels are predicted as body. The latter includes the slices where the prostate is missed entirely.
+  - The central slices dominate these pooled figures, so leakage on the end slices is not measured separately. On the largest miss (Figure 2, first row), part of the gland is labelled rectum.
+- **Physical scale is unknown.** With unknown spacing, a median HD95 of 2 pixels cannot be converted to millimetres or compared with clinical margins.
+
+**Answer to the dilemma, and recommendation for the project manager.**
+
+- **Scope of the answer:** only 2D models were compared, so whether more spatial context (dilated multi-scale networks or true 3D) removes the end-slice failures is not tested here. The evidence is that the failures are confined to the ends of the gland, where a single 2D slice shows very little prostate. Within 2D, the Improved U-Net does not fix them: it is close to the baseline on central slices and worse near the ends.
+- **Accuracy:** the baseline 2D U-Net is slightly better: test prostate Dice 0.8858 against 0.8738, and fewer misses near the ends of the gland.
+- **Resources:** the Improved U-Net is far cheaper.
+  - It has about 10 times fewer parameters and uses about 60% less training memory.
+  - At batch size 16 it takes about 27% less time per slice (0.46 against 0.63 ms).
+  - On single slices it is about 2.4 times slower (7.5 against 3.1 ms per slice).
+- **Recommendation:**
+  - Where GPU memory allows, use the baseline 2D U-Net for accuracy.
+  - Choose the Improved U-Net only when memory or batched throughput is the binding constraint.
+  - With either model, a contouring pipeline should send the outermost predicted prostate slice at each end, and the two to three slices beyond it, for manual review. Both models miss the true outermost slice in 12 of 18 cases, and every missed slice is within 2 slices of a true end (within 1 for the baseline). How far the predicted range falls short of the true range was not measured, so this margin should be checked before use.
+- **Next experiment:** add inter-slice context, either as neighbouring slices given as extra input channels (2.5D) or as a 3D model. Evaluate it with the same distance-from-end breakdown and HD95, together with the measured memory cost, to see whether it fixes the end-slice failures that the 2D models share.
 
 ## Progress update: predictions, failure cases and inference time (22 October 2026)
 
@@ -274,7 +337,7 @@ This milestone came from **independent online source research**, followed by a l
 - `modules.py`: the standard 2D U-Net baseline, the 2D Improved U-Net and the multiclass soft Dice loss.
 - `metrics.py`: per-series 3D Dice and the other fixed evaluation rules.
 - `train.py`: training, validation, checkpoint selection, saving, loss/metric curves and the one-time test evaluation.
-- `predict.py`: reloads the validation-selected checkpoints of both models after the test evaluation. It draws side-by-side test predictions and failure cases, rechecks the test prostate Dice and times inference. It does not choose a checkpoint or tune anything; the test predictions are used only to pick which slices to display.
+- `predict.py`: reloads the validation-selected checkpoints of both models after the test evaluation. It draws side-by-side test predictions and failure cases, rechecks the test prostate Dice, times inference and computes the boundary analysis (HD95, results by distance from the ends of the gland, and leakage into neighbouring classes). It does not choose a checkpoint or tune anything; the test predictions are used only to pick which slices to display.
 
 - `figures/`: training curves, test predictions and failure cases produced by `train.py` and `predict.py` on Rangpur.
 
@@ -378,6 +441,6 @@ The AI-suggested code was verified in four ways:
 - comparing the metrics with an independent NumPy reference on synthetic data;
 - running synthetic end-to-end training/resume/test checks on CPU.
 
-OpenAI Codex also assisted with the Colab execution guidance and the Colab T4 timing update (21 October 2026), using the console outputs supplied by the user. Claude Code summarised the Rangpur run files supplied by the user for the training, test and prediction updates, and described the figures.
+OpenAI Codex also assisted with the Colab execution guidance and the Colab T4 timing update (21 October 2026), using the console outputs supplied by the user. Claude Code summarised the Rangpur run files supplied by the user for the training, test, prediction and boundary-analysis updates, and described the figures. It also drafted the answer to the research dilemma and the engineering recommendation, which the user reviewed. The HD95 code was checked against a NumPy brute-force reference on synthetic masks, and the figure files of the two `predict.py` runs were byte-compared locally.
 
 All training, validation, test and prediction results (the Colab timing runs and the Rangpur jobs) come from runs the user executed. The AI ran only the local mask comparison, the dataset audit, the synthetic CPU checks on random data and a layer count of the untrained models. It did not train or evaluate the reported models. The AI derived summary figures such as gaps, counts and pixel medians from the result files the user supplied.
