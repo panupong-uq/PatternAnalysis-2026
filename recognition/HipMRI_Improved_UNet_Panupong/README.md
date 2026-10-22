@@ -106,7 +106,7 @@ This milestone came from **independent online source research**, followed by a l
 - `modules.py`: the standard 2D U-Net baseline, the 2D Improved U-Net and the multiclass soft Dice loss.
 - `metrics.py`: per-series 3D Dice and the other fixed evaluation rules.
 - `train.py`: training, validation, checkpoint selection, saving, loss/metric curves and the one-time test evaluation.
-- `predict.py` (planned): saved-model inference and visualisation.
+- `predict.py`: reloads the validation-selected checkpoints of both models after the test evaluation. It draws side-by-side test predictions and failure cases, rechecks the test prostate Dice and times inference. It does not choose a checkpoint or tune anything; the test predictions are used only to pick which slices to display.
 
 This README is still a progress document. It will become the full report once verified experiments exist.
 
@@ -132,6 +132,7 @@ pip install nibabel==5.4.2              # torch/torchvision/matplotlib are prein
 python dataset.py --data-root keras_slices_data                      # pipeline self-check
 python train.py --model unet --epochs 1 --max-train-batches 100      # timing run, no test
 python train.py --model improved --epochs 40 --out-dir runs/improved --test
+python predict.py --runs-dir runs   # after both models are tested; writes runs/predict_best/
 ```
 
 On Rangpur, `train.py` runs inside a Slurm job (`--partition=comp3710 --account=comp3710 --gres=gpu:1`) and reads the course copy of the data directly:
