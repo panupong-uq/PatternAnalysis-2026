@@ -3,7 +3,8 @@
 Run this after ``train.py --test`` has evaluated both models. It does not
 train, choose a checkpoint or tune anything: the checkpoints were already
 chosen on the validation split by train.py. Here the test predictions are
-used only to pick which slices to display and to time inference.
+only reported (slice-level and boundary metrics) and used to pick which
+slices to display; nothing is selected or tuned on them.
 
 * Visual comparison: MRI, ground truth and both models' predictions for one
   slice from each of ``--num-examples`` test series (evenly spread over the
@@ -13,6 +14,12 @@ used only to pick which slices to display and to time inference.
   slice per series so the cases do not come from neighbouring slices. Many
   small edge slices score exactly 0, so ties go to the larger ground-truth
   prostate (the largest missed regions are shown first).
+* Boundary analysis: the prostate 95th-percentile Hausdorff distance (HD95,
+  in pixels) of every slice where both the ground truth and the prediction
+  contain prostate; slice Dice, missed slices and HD95 grouped by distance
+  from the nearest end of the series' prostate slice range (0, 1, 2, 3+);
+  and how predicted prostate pixels are split over the true classes (and
+  the reverse), to show leakage into the rectum or bladder.
 * Consistency check: the per-series test prostate Dice is recomputed with
   ``metrics.py`` and printed next to the value ``train.py`` saved in
   ``test_metrics_<checkpoint>.json``.
@@ -33,8 +40,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
-from dataset import CLASS_NAMES, PROSTATE_LABEL, HipMRISliceDataset
+from dataset import CLASS_NAMES, NUM_CLASSES, PROSTATE_LABEL, HipMRISliceDataset
 from metrics import SegmentationMetrics
 from modules import build_model, count_parameters
 
@@ -126,6 +134,85 @@ def prostate_dice_per_slice(predictions, labels):
     intersection = (pred & target).sum((1, 2)).tolist()
     total = (pred.sum((1, 2)) + target.sum((1, 2))).tolist()
     return [2 * i / t if t > 0 else None for i, t in zip(intersection, total)]
+
+
+def boundary_pixels(mask):
+    """Pixels of a binary mask (H, W) with a background pixel among their 8 neighbours.
+
+    Pixels outside the image are ignored (max-pool pads with -inf).
+    """
+    m = mask.float()[None, None]
+    eroded = -F.max_pool2d(-m, kernel_size=3, stride=1, padding=1)  # 3x3 erosion
+    return (m - eroded)[0, 0] > 0
+
+
+def hd95(pred_mask, true_mask):
+    """95th-percentile Hausdorff distance in pixels between two binary masks.
+
+    The 95th percentile of the distances from each boundary pixel to the
+    other boundary is taken in both directions, and the larger value is
+    returned (the same rule as MONAI's percentile=95; the 8-neighbour
+    boundary used here can make values differ from MONAI's by about a
+    pixel). None when either mask is empty.
+    """
+    if not pred_mask.any() or not true_mask.any():
+        return None
+    a = boundary_pixels(pred_mask).nonzero().float()
+    b = boundary_pixels(true_mask).nonzero().float()
+    distances = torch.cdist(a, b)
+    return max(torch.quantile(distances.min(dim=1).values, 0.95).item(),
+               torch.quantile(distances.min(dim=0).values, 0.95).item())
+
+
+def distance_to_prostate_end(keys, labels):
+    """Slices from each prostate slice to the nearest end of its series' prostate range.
+
+    The Nifti files carry no orientation, so the two ends (base and apex)
+    cannot be told apart; None for slices without prostate.
+    """
+    has_prostate = (labels == PROSTATE_LABEL).flatten(1).any(dim=1).tolist()
+    ends = {}
+    for (case, week, s), present in zip(keys, has_prostate):
+        if present:
+            low, high = ends.get((case, week), (s, s))
+            ends[(case, week)] = (min(low, s), max(high, s))
+    return [min(s - ends[(c, w)][0], ends[(c, w)][1] - s) if present else None
+            for (c, w, s), present in zip(keys, has_prostate)]
+
+
+def boundary_analysis(predictions, labels, dice, end_distance):
+    """HD95, edge-versus-centre slice results and prostate leakage for one model."""
+    pred = predictions == PROSTATE_LABEL
+    target = labels == PROSTATE_LABEL
+    hd = [hd95(pred[i], target[i]) if end_distance[i] is not None else None
+          for i in range(len(labels))]
+
+    def summarise(indices):
+        values = [hd[i] for i in indices if hd[i] is not None]
+        return {
+            "slices": len(indices),
+            "mean_dice": float(np.mean([dice[i] for i in indices])) if indices else None,
+            "missed_slices": sum(1 for i in indices if not pred[i].any()),
+            "hd95_slices": len(values),
+            "hd95_px_median": float(np.median(values)) if values else None,
+            "hd95_px_mean": float(np.mean(values)) if values else None,
+        }
+
+    positive = [i for i, d in enumerate(end_distance) if d is not None]
+    groups = {"0": [i for i in positive if end_distance[i] == 0],
+              "1": [i for i in positive if end_distance[i] == 1],
+              "2": [i for i in positive if end_distance[i] == 2],
+              "3+": [i for i in positive if end_distance[i] >= 3]}
+
+    # Where predicted prostate pixels really belong, and where true prostate pixels went.
+    by_true = torch.bincount(labels[pred], minlength=NUM_CLASSES) / max(int(pred.sum()), 1)
+    by_pred = torch.bincount(predictions[target], minlength=NUM_CLASSES) / max(int(target.sum()), 1)
+    return {
+        "all_prostate_slices": summarise(positive),
+        "by_slices_from_prostate_end": {name: summarise(g) for name, g in groups.items()},
+        "predicted_prostate_by_true_class": dict(zip(CLASS_NAMES, by_true.tolist())),
+        "true_prostate_by_predicted_class": dict(zip(CLASS_NAMES, by_pred.tolist())),
+    }
 
 
 def choose_examples(keys, labels, n):
@@ -228,6 +315,7 @@ def main():
         "torch": str(torch.__version__), "python": platform.python_version(), "amp": use_amp,
         "checkpoint": args.checkpoint, "test_slices": len(samples), "models": {},
     }
+    end_distance = distance_to_prostate_end(keys, labels)
     predictions, dice = {}, {}
     for name in MODELS:
         model_dir = runs_dir / name
@@ -245,10 +333,11 @@ def main():
 
         timing = [time_inference(model, images, device, use_amp, batch_size, args.timing_repeats)
                   for batch_size in (1, args.batch_size)]
+        boundary = boundary_analysis(predictions[name], labels, dice[name], end_distance)
         report["models"][name] = {
             "checkpoint_epoch": epoch, "parameters": count_parameters(model),
             "test_prostate_dice_recomputed": recomputed, "test_prostate_dice_saved": saved,
-            "timing": timing,
+            "timing": timing, "boundary": boundary,
         }
         print(f"{MODELS[name]} ({args.checkpoint}, epoch {epoch}): test prostate Dice "
               f"per-series mean {recomputed:.4f} (saved by train.py: "
@@ -256,6 +345,15 @@ def main():
         for t in timing:
             print(f"  batch {t['batch_size']:2d}: {t['ms_per_slice']:.3f} ms/slice, "
                   f"{t['slices_per_second']:.0f} slices/s")
+        groups = {"all": boundary["all_prostate_slices"], **boundary["by_slices_from_prostate_end"]}
+        for group, g in groups.items():
+            label = "all" if group == "all" else f"{group} from end"
+            hd = "n/a" if g["hd95_px_median"] is None else f"{g['hd95_px_median']:.2f} px"
+            print(f"  prostate slices {label:>10}: {g['slices']:3d} slices, mean Dice "
+                  f"{_format_dice(g['mean_dice'])}, missed {g['missed_slices']:2d}, HD95 median {hd}")
+        leak = boundary["predicted_prostate_by_true_class"]
+        print(f"  predicted prostate pixels that are truly rectum {leak['Rectum']:.2%}, "
+              f"bladder {leak['Bladder']:.2%}, body {leak['Body']:.2%}")
         del model
         if device.type == "cuda":
             torch.cuda.empty_cache()

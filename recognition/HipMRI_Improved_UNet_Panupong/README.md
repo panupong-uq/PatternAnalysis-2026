@@ -14,6 +14,60 @@ COMP3710 individual project: compare a standard 2D U-Net baseline with the cours
 - Both models were tested once on the test split, using the best-validation and last checkpoints fixed before training. **Both exceed the target prostate test Dice of 0.75** (results below).
 - `predict.py` was run on Rangpur. It reproduced the test Dice of both models and produced the prediction figures, failure cases and inference times below.
 
+## Feasibility review (compulsory check-off document)
+
+This is the one-page feasibility review presented to the tutor at the compulsory check-off. The check-off was completed by 11 October 2026. The text below is the 7 October 2026 version. It is reproduced unchanged except for four things: its title line ("COMP3710: HipMRI 2D Segmentation") is replaced by this heading, the student number is omitted from the header line, and the heading levels and link formatting were adapted for this README. Reference [1] is the version of the assignment specification that was current at the time. It was written before any model was trained, so its open questions and plans are as they stood then. The outcome of each acceptance criterion is given after it.
+
+**One-page feasibility review - DRAFT for tutor consultation**
+
+Student: Panupong Pakwiset | Date: 7 October 2026 | Difficulty: Normal
+
+### 1. User need, scope and acceptance criteria
+
+The intended user is an imaging specialist reviewing proposed prostate contours. This educational prototype will compare standard 2D U-Net with 2D Improved U-Net on HipMRI. The engineering question is whether the improved 2D architecture reduces missed tissue and boundary leakage enough to justify its computational cost. Global Dice will be considered alongside boundary errors. Proposed acceptance criteria are:
+
+1. **Data integrity:** preserve supplied splits; verify patient grouping across visits, readable image-mask pairs, spatial alignment and confirmed anatomical label IDs before modelling.
+2. **Accuracy:** target prostate test Dice >= 0.75; report per-class Dice/IoU using an explicit aggregation and empty-mask policy fixed before final evaluation.
+3. **Fair comparison:** evaluate both models on identical held-out data with matched preprocessing and a documented training budget; select settings using validation only.
+4. **Failure analysis:** compare input, ground truth and both models' predictions for 3-5 low-performing cases. Quantify missed/extra prostate pixels, investigate causes such as small targets, unclear boundaries or annotation uncertainty, and distinguish recurring limitations from isolated errors. Inspect base/apex cases only when anatomical ordering is verified.
+5. **Resources:** aim for peak training VRAM <= 12 GiB on one Colab T4; measure parameter count, peak VRAM and inference time for both models. This is a proposed limit, not measured usage.
+
+### 2. Model choice and course concepts
+
+Use HipMRI Nifti slices with the supplied train/validation/test allocation. Standard 2D U-Net [2] is the baseline. The Normal-level model will be a documented 2D adaptation of Isensee et al. [3], retaining residual context blocks, instance normalization and multi-scale segmentation outputs (deep supervision). Confirm this adaptation with the tutor because the reference architecture is 3D. Skip connections preserve spatial detail, residual connections support gradient flow, and Dice-based optimization addresses class imbalance. The paper's qualitative analysis links some errors to poorly defined labels, motivating inspection of annotation uncertainty in our own results rather than attributing every error to the architecture. Normalize image intensities and apply paired augmentation; class channels depend on the complete label audit.
+
+### 3. Preliminary feasibility evidence
+
+Local file counts are 11,460 training, 660 validation and 540 test image-mask pairs. The earlier filename audit recorded no missing counterparts or overlapping case IDs between splits; patient grouping across visits still requires verification. A saved inspection of one training pair shows matching 256 x 128 shapes and affines, finite values, and mask IDs 0-3; anatomical meanings and the complete label set remain unknown. Saved outputs from the 4 October VS Code/Colab check show successful PyTorch CUDA tensor arithmetic on a Tesla T4. This verifies GPU access, not model feasibility. No segmentation model, training run, benchmark or measured model memory exists yet.
+
+### 4. Risks, budget, next experiment and fallback
+
+Main risks are unknown prostate mapping, class imbalance, ambiguous boundaries, patient leakage and Colab interruptions. Confirm processed 2D label IDs with the tutor, audit grouping and labels, and store checkpoints/results persistently outside temporary runtime storage. A provisional budget is one T4 and at most 6 GPU-hours for the initial two-model comparison; revise this after measuring epoch time. The repository is set up. Next: complete the data audit, build the data loader and inspect a batch. After label confirmation, run a brief baseline smoke test before longer experiments. If memory is insufficient, reduce batch size first. If Improved U-Net remains infeasible, retain the standard 2D baseline and discuss an Easy-level scope with the tutor. Recommend the improved model only if measured boundary-error reduction justifies its additional memory and inference cost; otherwise recommend the baseline and explain the trade-off.
+
+### References
+
+[1] COMP3710 Report draft v2.2, Sections 2.2 and 3 (pp. 5-6, 11-12).
+
+[2] Ronneberger et al. (2015), *U-Net: Convolutional Networks for Biomedical Image Segmentation*. <https://arxiv.org/abs/1505.04597>
+
+[3] Isensee et al. (2018), *Brain Tumor Segmentation and Radiomics Survival Prediction: Contribution to the BRATS 2017 Challenge*. <https://arxiv.org/abs/1802.10508>
+
+### Outcome of the review (updated 22 October 2026)
+
+| Acceptance criterion | Outcome |
+| --- | --- |
+| 1. Data integrity | Met, with limits. The supplied splits were kept, and filename case IDs are disjoint across splits (31 / 4 / 3 cases). A full audit read all 12,660 image-mask pairs and found them readable, with matching shapes and affines. Label 5 = prostate was confirmed from the dataset publisher's documentation and a direct check of one series ([LABEL_MAPPING.md](LABEL_MAPPING.md)); this was found by independent research, not confirmed by the tutor. Patient identity beyond the filename case IDs cannot be verified. |
+| 2. Accuracy | Met. Test prostate Dice (per-series 3D mean) is 0.8858 for the baseline and 0.8738 for the Improved U-Net. Per-class Dice/IoU are reported, and the aggregation and empty-mask rules were fixed before training. |
+| 3. Fair comparison | Met. Both models used the same splits, preprocessing, loss, optimiser, 40-epoch budget, seed and GPU type. Checkpoints were chosen on validation only. Test metrics were computed once; the later `predict.py` runs only reproduce them, draw figures and add analysis, with nothing selected or tuned. |
+| 4. Failure analysis | Largely met. Five failure cases are shown, and small targets at the ends of the gland are identified as the recurring limitation. The Improved U-Net predicts no prostate on these slices, so all their prostate pixels are missed. Extra prostate pixels are reported only as false-positive slice counts, and annotation uncertainty was not assessed. The spacing has no known units and the physical orientation cannot be verified, so the condition for naming base or apex is not met; the cases are described as the two ends of the prostate's slice range instead. |
+| 5. Resources | Met. Peak training memory was 2.32 GiB (baseline) and 0.96 GiB (Improved) on the A100, and 4.85 / 0.92 GiB in the Colab T4 timing runs, all below 12 GiB. Parameter counts and inference times were measured. |
+
+Changes from the plan:
+
+- **Platform:** final training moved from Colab T4 to the course's Rangpur cluster (A100). Training plus validation took 20.4 min (baseline) and 17.1 min (Improved) for 40 epochs. The job wall times were 29 and 19 min, well inside the 6 GPU-hour budget.
+- **Risks resolved:** the prostate label mapping was resolved from the publisher's documentation. The pre-specified switch to a Dice plus cross-entropy loss was not needed, and the Improved U-Net was feasible, so the Easy-level fallback was not used.
+- **Open question:** the review asks whether the Improved U-Net reduces missed tissue and boundary leakage enough to justify its cost. Missed tissue and computational cost are reported in the results sections below. A boundary analysis (HD95 and prostate pixels predicted in the rectum or bladder) has been added to `predict.py`, but its results are not reported yet, so the final recommendation is still pending.
+
 ## Progress update: predictions, failure cases and inference time (22 October 2026)
 
 `predict.py` was run once on Rangpur (job 685612, node `a100-4`, NVIDIA A100-PCIE-40GB, code at commit `b7d4fba`, 1 min 7 s). It reloaded the validation-selected checkpoints and the test split. The user ran the job and copied the outputs back.
@@ -270,6 +324,7 @@ These rules were set before any training:
 - **Labels:** labels 0-5 are kept as stored and one-hot encoded. Label 5 is the prostate.
 - **Augmentation:** training slices only. Rotation +/-15 degrees, scale 0.85-1.15, a flip along the 256-pixel axis, and gamma 0.7-1.5, each with p = 0.5.
 - **Loss:** both models use the multiclass soft Dice loss of Isensee et al. (2018, Eq. 1), summed over the whole batch. The batch size is at least 8.
+- **Empty masks:** Dice is undefined (excluded from the mean and counted) when both the prediction and the ground truth are empty, and 0 when only the prediction is non-empty. Every validation and test series contains prostate.
 - **Primary metric:** 3D prostate Dice per case/week series, averaged over series. It is also used for validation checkpoint selection. The global, case-weighted, per-class Dice/IoU and slice-level metrics are reported alongside it.
 
 ## Deviations from the reference papers
