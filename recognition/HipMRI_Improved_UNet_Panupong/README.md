@@ -443,7 +443,12 @@ python train.py --model unet --epochs 1 --max-train-batches 100      # timing ru
 python train.py --model improved --epochs 40 --out-dir runs/improved # full training; review the curves next
 python train.py --model improved --out-dir runs/improved --resume --test   # one-time test after a completed 40-epoch run
 python predict.py --runs-dir runs   # after both models are tested; writes runs/predict_best/
+# 2.5D experiment: the previous, current and next slices as three input channels
+python train.py --model improved --context-slices 1 --out-dir runs/improved_25d
+python predict.py --runs-dir runs --split validation --models unet improved improved_25d
 ```
+
+`--context-slices` defaults to 0, which is the plain 2D input used for the main results; with 0 the data pipeline produces exactly the same samples as before the option was added. `predict.py --split validation` runs the same figures and boundary analysis on the validation split, so the 2.5D run can be judged without the test split.
 
 On Rangpur, `train.py` runs inside a Slurm job (`--partition=comp3710 --account=comp3710 --gres=gpu:1`) and reads the course copy of the data directly:
 
@@ -479,11 +484,11 @@ The HipMRI dataset and the saved model weights are kept outside Git version cont
 
 ## 8. Files
 
-- `dataset.py`: image-mask pairing, the case-ID split check, preprocessing, paired augmentation and DataLoaders.
+- `dataset.py`: image-mask pairing, the case-ID split check, preprocessing, paired augmentation and DataLoaders, with an optional 2.5D input of neighbouring slices (`context_slices`).
 - `modules.py`: the standard 2D U-Net baseline, the 2D Improved U-Net and the multiclass soft Dice loss.
 - `metrics.py`: per-series 3D Dice and the other fixed evaluation rules.
-- `train.py`: training, validation, checkpoint selection, saving, loss/metric curves and the one-time test evaluation.
-- `predict.py`: reloads the validation-selected checkpoints of both models after the test evaluation. It draws side-by-side test predictions and failure cases, rechecks the test prostate Dice, times inference and computes the boundary analysis (HD95, results by distance from the ends of the gland, and leakage into neighbouring classes). It does not choose a checkpoint or tune anything; the test predictions are used only to pick which slices to display.
+- `train.py`: training, validation, checkpoint selection, saving, loss/metric curves and the one-time test evaluation; `--context-slices` selects the 2.5D input.
+- `predict.py`: reloads the validation-selected checkpoints of both models after the test evaluation. It draws side-by-side test predictions and failure cases, each prediction followed by a prostate difference overlay (true positives, false positives and false negatives), rechecks the test prostate Dice, times inference and computes the boundary analysis (HD95, results by distance from the ends of the gland, and leakage into neighbouring classes). It does not choose a checkpoint or tune anything; the test predictions are used only to pick which slices to display. `--models` and `--split validation` compare other runs, such as the 2.5D experiment, on the validation split.
 - `LABEL_MAPPING.md`: the source and verification of the label mapping (5 = prostate).
 - `figures/`: the architecture diagram (Figure 1), training curves, test predictions and failure cases. The training curves come from `train.py` and the prediction figures from `predict.py`, both on Rangpur. The architecture diagram was drawn with a matplotlib script kept outside this repository, from the layer definitions in `modules.py`, without building or running a model.
 

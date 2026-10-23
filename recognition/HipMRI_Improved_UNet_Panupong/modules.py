@@ -281,12 +281,16 @@ class MulticlassSoftDiceLoss(nn.Module):
         return -2.0 * (intersection / (denominator + self.eps)).mean()
 
 
-def build_model(name, num_classes=6):
-    """Create a model by name: ``"unet"`` (baseline) or ``"improved"``."""
+def build_model(name, num_classes=6, in_channels=1):
+    """Create a model by name: ``"unet"`` (baseline) or ``"improved"``.
+
+    ``in_channels`` is 1 for 2D slices and 2K + 1 for 2.5D input with K
+    neighbouring slices on each side; only the first convolution changes.
+    """
     if name == "unet":
-        return UNet(num_classes=num_classes)
+        return UNet(in_channels=in_channels, num_classes=num_classes)
     if name == "improved":
-        return ImprovedUNet(num_classes=num_classes)
+        return ImprovedUNet(in_channels=in_channels, num_classes=num_classes)
     raise ValueError(f"Unknown model {name!r}; use 'unet' or 'improved'")
 
 

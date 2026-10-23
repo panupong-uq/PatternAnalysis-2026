@@ -21,10 +21,18 @@ Preprocessing policy (fixed before any training):
 * Augmentation (training only): the same random rotation/scale and flip are
   applied to the image and mask (nearest-neighbour for the mask), followed by
   gamma augmentation on the image.
+* Optional 2.5D input (``context_slices=K``, default 0 = plain 2D): the
+  image also holds the K slices on each side of the target slice from the
+  same series, giving 2K + 1 channels in slice order with the target slice
+  in the middle. At the ends of a series the end slice is repeated. Each
+  channel is normalised on its own (as a 2D slice would be), all channels
+  share the same augmentation, and the mask is that of the target slice
+  only. With K = 0 every sample is exactly as before.
 
-Each sample is a dictionary with ``image`` (1, 256, 128), ``mask`` one-hot
-(6, 256, 128), ``label`` integer map (256, 128) and the ``case``, ``week``
-and ``slice`` identifiers used to stack predictions into per-series volumes.
+Each sample is a dictionary with ``image`` (2K + 1, 256, 128), ``mask``
+one-hot (6, 256, 128), ``label`` integer map (256, 128) and the ``case``,
+``week`` and ``slice`` identifiers used to stack predictions into per-series
+volumes.
 """
 
 import argparse
@@ -185,7 +193,10 @@ class TrainAugmentation:
         return low + (high - low) * torch.rand(()).item()
 
     def __call__(self, image, label):
-        """``image`` is a float tensor (1, H, W); ``label`` is a long tensor (H, W)."""
+        """``image`` is a float tensor (C, H, W); ``label`` is a long tensor (H, W).
+
+        Every channel gets the same rotation, scale, flip and gamma.
+        """
         if torch.rand(()) < self.p_affine:
             angle = self._uniform(-self.max_rotation, self.max_rotation)
             scale = self._uniform(*self.scale_range)
@@ -204,8 +215,10 @@ class TrainAugmentation:
         if torch.rand(()) < self.p_gamma:
             # Gamma needs values in [0, 1]; this temporary min-max scaling is
             # removed again by the z-score that follows in the dataset.
+            # Each channel is scaled with its own minimum and maximum.
             gamma = self._uniform(*self.gamma_range)
-            low, high = image.min(), image.max()
+            low = image.amin(dim=(-2, -1), keepdim=True)
+            high = image.amax(dim=(-2, -1), keepdim=True)
             image = ((image - low) / (high - low + 1e-8)).clamp(0.0, 1.0) ** gamma
 
         return image, label
@@ -225,17 +238,24 @@ class HipMRISliceDataset(Dataset):
             ``num_workers=0`` there; Linux (e.g. Colab) shares it.
         check_counts: compare the pair and cropped-slice counts with the
             full dataset audit.
+        context_slices: number K of neighbouring slices on each side added
+            as extra input channels (2.5D input); 0 gives plain 2D slices.
     """
 
-    def __init__(self, data_root, split, augment=None, cache=True, check_counts=True):
+    def __init__(self, data_root, split, augment=None, cache=True, check_counts=True,
+                 context_slices=0):
         if split not in SPLIT_FOLDERS:
             raise ValueError(f"split must be one of {list(SPLIT_FOLDERS)}")
+        if context_slices < 0:
+            raise ValueError("context_slices must be 0 or more")
         self.split = split
         self.augment = augment
+        self.context_slices = context_slices
         self.pairs = find_pairs(data_root, split)
         if check_counts and len(self.pairs) != EXPECTED_PAIRS[split]:
             raise ValueError(f"{split}: found {len(self.pairs)} pairs, "
                              f"expected {EXPECTED_PAIRS[split]}")
+        self.neighbours = self._neighbour_indices() if context_slices else None
 
         if cache:
             reads = [self._read_pair(i) for i in range(len(self.pairs))]
@@ -250,6 +270,32 @@ class HipMRISliceDataset(Dataset):
         if check_counts and len(self.cropped) != EXPECTED_CROPPED[split]:
             raise ValueError(f"{split}: {len(self.cropped)} slices need cropping, "
                              f"expected {EXPECTED_CROPPED[split]}")
+
+    def _neighbour_indices(self):
+        """For each pair, the pair indices of slices s-K, ..., s+K of the same series.
+
+        Slice numbers outside the series are clamped to its first or last
+        slice. A series must hold every slice number between its first and
+        last, otherwise a neighbour would be missing.
+        """
+        index_of = {pair[2:]: i for i, pair in enumerate(self.pairs)}
+        series = defaultdict(list)
+        for case, week, slice_index in index_of:
+            series[(case, week)].append(slice_index)
+        bounds = {}
+        for key, slices in series.items():
+            low, high = min(slices), max(slices)
+            if len(slices) != high - low + 1:
+                raise ValueError(f"{self.split}: series {key} has gaps in its slice numbers")
+            bounds[key] = (low, high)
+
+        k = self.context_slices
+        neighbours = []
+        for _, _, case, week, slice_index in self.pairs:
+            low, high = bounds[(case, week)]
+            neighbours.append([index_of[(case, week, min(max(s, low), high))]
+                               for s in range(slice_index - k, slice_index + k + 1)])
+        return neighbours
 
     def _arrays(self, index):
         """Return the (image, mask) arrays of one pair from the cache or from disk."""
@@ -294,11 +340,17 @@ class HipMRISliceDataset(Dataset):
         image, mask = self._arrays(index)
         _, _, case, week, slice_index = self.pairs[index]
 
-        image = torch.from_numpy(image.astype(np.float32)).unsqueeze(0)  # (1, H, W)
-        label = torch.from_numpy(mask.astype(np.int64))                  # (H, W)
+        if self.neighbours is not None:
+            # 2.5D: stack the neighbouring slices; the target slice is in the middle.
+            image = np.stack([self._arrays(j)[0] for j in self.neighbours[index]])
+        else:
+            image = image[np.newaxis]
+        image = torch.from_numpy(image.astype(np.float32))  # (C, H, W)
+        label = torch.from_numpy(mask.astype(np.int64))    # (H, W)
         if self.augment is not None:
             image, label = self.augment(image, label)
-        image = normalise_slice(image)
+        # Per-channel z-score; with one channel this is the 2D normalisation.
+        image = torch.cat([normalise_slice(channel.unsqueeze(0)) for channel in image])
         if not torch.isfinite(image).all():
             raise ValueError(f"Non-finite values after normalisation: {self.pairs[index][0].name}")
 
@@ -317,7 +369,8 @@ class HipMRISliceDataset(Dataset):
         return sorted({(p[2], p[3]) for p in self.pairs})
 
 
-def make_dataloaders(data_root, batch_size=16, num_workers=None, seed=42, cache=True):
+def make_dataloaders(data_root, batch_size=16, num_workers=None, seed=42, cache=True,
+                     context_slices=0):
     """Build train/validation/test DataLoaders using the supplied splits.
 
     Only the training loader shuffles and augments. Shuffling uses a seeded
@@ -332,6 +385,7 @@ def make_dataloaders(data_root, batch_size=16, num_workers=None, seed=42, cache=
     both models so they see the same augmentation stream. Workers are not
     persistent, so reseeding the training generator before an epoch (as
     ``train.py`` does) fixes that epoch's order and augmentation.
+    ``context_slices`` is passed to every split (see ``HipMRISliceDataset``).
     """
     if batch_size < 8:
         raise ValueError("batch_size must be at least 8 (see the data policy)")
@@ -342,9 +396,12 @@ def make_dataloaders(data_root, batch_size=16, num_workers=None, seed=42, cache=
     check_split_disjoint(data_root)
 
     datasets = {
-        "train": HipMRISliceDataset(data_root, "train", augment=TrainAugmentation(), cache=cache),
-        "validation": HipMRISliceDataset(data_root, "validation", cache=cache),
-        "test": HipMRISliceDataset(data_root, "test", cache=cache),
+        "train": HipMRISliceDataset(data_root, "train", augment=TrainAugmentation(), cache=cache,
+                                    context_slices=context_slices),
+        "validation": HipMRISliceDataset(data_root, "validation", cache=cache,
+                                         context_slices=context_slices),
+        "test": HipMRISliceDataset(data_root, "test", cache=cache,
+                                   context_slices=context_slices),
     }
     generator = torch.Generator().manual_seed(seed)
     loaders = {
@@ -397,7 +454,8 @@ def save_augmentation_preview(dataset, path, n=8, seed=0):
     fig, axes = plt.subplots(2, len(indices), figsize=(2.2 * len(indices), 8))
     for column, index in enumerate(indices):
         sample = dataset[index]
-        image = sample["image"][0].numpy()
+        # The target slice (the middle channel for 2.5D input) matches the label.
+        image = sample["image"][sample["image"].shape[0] // 2].numpy()
         label = sample["label"].numpy()
         title = f"{sample['case']}/w{sample['week']}/s{sample['slice']}"
         axes[0, column].imshow(image, cmap="gray")
@@ -421,19 +479,23 @@ def main():
                         help="path to the keras_slices_data folder")
     parser.add_argument("--preview", default=None,
                         help="optional PNG path for a training augmentation preview")
+    parser.add_argument("--context-slices", type=int, default=0,
+                        help="neighbouring slices on each side for 2.5D input (0 = 2D)")
     args = parser.parse_args()
 
     cases = check_split_disjoint(args.data_root)
     print("Case IDs per split:", {split: len(ids) for split, ids in cases.items()})
+    channels = 2 * args.context_slices + 1
     for split in SPLIT_FOLDERS:
         augment = TrainAugmentation() if split == "train" else None
-        dataset = HipMRISliceDataset(args.data_root, split, augment=augment)
+        dataset = HipMRISliceDataset(args.data_root, split, augment=augment,
+                                     context_slices=args.context_slices)
         print(split, summarise_split(dataset))
 
         # Check every item of the split (training items are freshly augmented).
         for index in range(len(dataset)):
             sample = dataset[index]
-            assert sample["image"].shape == (1, TARGET_HEIGHT, TARGET_WIDTH)
+            assert sample["image"].shape == (channels, TARGET_HEIGHT, TARGET_WIDTH)
             assert sample["mask"].shape == (NUM_CLASSES, TARGET_HEIGHT, TARGET_WIDTH)
             assert sample["image"].abs().max() <= 5.0
             assert torch.all(sample["mask"].sum(dim=0) == 1)

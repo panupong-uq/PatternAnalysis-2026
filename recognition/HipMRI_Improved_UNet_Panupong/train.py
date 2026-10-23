@@ -20,6 +20,9 @@ changes the architecture.
   and once for the last checkpoint. It is refused for shortened runs and
   never overwrites earlier test results, so test scores cannot feed back
   into any setting.
+* 2.5D experiment: ``--context-slices K`` feeds the K neighbouring slices on
+  each side as extra input channels (see ``dataset.py``). Everything else
+  stays the same; the default 0 is the 2D setting of the main results.
 
 Examples::
 
@@ -27,6 +30,8 @@ Examples::
     python train.py --model unet --epochs 1 --max-train-batches 100
     # full run with the final test evaluation
     python train.py --model improved --epochs 40 --out-dir runs/improved --test
+    # 2.5D experiment: three adjacent slices as input
+    python train.py --model improved --context-slices 1 --out-dir runs/improved_25d
 """
 
 import argparse
@@ -56,6 +61,8 @@ def parse_args():
                         help="number of paper epochs the decay is spread over")
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--context-slices", type=int, default=0,
+                        help="neighbouring slices on each side as extra channels (0 = 2D)")
     parser.add_argument("--no-amp", action="store_true", help="disable mixed precision")
     parser.add_argument("--max-train-batches", type=int, default=None,
                         help="stop each epoch early (timing and smoke tests only)")
@@ -68,7 +75,9 @@ def parse_args():
 WARMUP_BATCHES = 5  # excluded from the steady-state timing (cuDNN autotuning, worker start-up)
 # Arguments that must not change when a run is resumed.
 RESUME_KEYS = ("model", "epochs", "batch_size", "lr", "weight_decay", "lr_decay",
-               "paper_epochs", "seed", "max_train_batches")
+               "paper_epochs", "seed", "max_train_batches", "context_slices")
+# Values for keys added after the first runs, whose checkpoints do not store them.
+RESUME_DEFAULTS = {"context_slices": 0}
 
 
 def run_epoch(model, loader, loss_fn, device, use_amp, optimizer=None, scaler=None,
@@ -157,6 +166,8 @@ def save_curves(history, path):
 
 def main():
     args = parse_args()
+    if args.context_slices < 0:
+        raise SystemExit("--context-slices must be 0 or more")
     if args.test and args.max_train_batches is not None:
         raise SystemExit("--test is not allowed with --max-train-batches (shortened runs)")
     out_dir = Path(args.out_dir or f"runs/{args.model}")
@@ -171,8 +182,9 @@ def main():
     torch.backends.cudnn.benchmark = True  # faster convolutions; not bit-for-bit reproducible
 
     loaders = make_dataloaders(args.data_root, batch_size=args.batch_size,
-                               num_workers=args.num_workers, seed=args.seed)
-    model = build_model(args.model).to(device)
+                               num_workers=args.num_workers, seed=args.seed,
+                               context_slices=args.context_slices)
+    model = build_model(args.model, in_channels=2 * args.context_slices + 1).to(device)
     loss_fn = MulticlassSoftDiceLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -187,15 +199,15 @@ def main():
         "parameters": count_parameters(model),
         "train_batches_per_epoch": len(loaders["train"]),
     }
-    (out_dir / "config.json").write_text(json.dumps(config, indent=2))
-    print(json.dumps(config, indent=2))
-
     history, start_epoch = [], 1
     best = {"score": -1.0, "val_loss": float("inf"), "epoch": None}
     last_path, best_path = out_dir / "last.pt", out_dir / "best.pt"
-    if args.resume and last_path.is_file():
+    if args.resume:
+        if not last_path.is_file():
+            raise SystemExit(f"--resume given but {last_path} does not exist (check --out-dir)")
         state = torch.load(last_path, map_location=device)
-        changed = [k for k in RESUME_KEYS if state["config"].get(k) != getattr(args, k)]
+        changed = [k for k in RESUME_KEYS
+                   if state["config"].get(k, RESUME_DEFAULTS.get(k)) != getattr(args, k)]
         if changed:
             raise SystemExit(f"Cannot resume: {changed} differ from the saved run")
         model.load_state_dict(state["model"])
@@ -204,6 +216,9 @@ def main():
         scaler.load_state_dict(state["scaler"])
         history, best, start_epoch = state["history"], state["best"], state["epoch"] + 1
         print(f"Resumed after epoch {state['epoch']}")
+    # Written only after the resume check, so a refused resume leaves config.json as it was.
+    (out_dir / "config.json").write_text(json.dumps(config, indent=2))
+    print(json.dumps(config, indent=2))
 
     for epoch in range(start_epoch, args.epochs + 1):
         if device.type == "cuda":

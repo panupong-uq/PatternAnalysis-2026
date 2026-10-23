@@ -9,6 +9,9 @@ slices to display; nothing is selected or tuned on them.
 * Visual comparison: MRI, ground truth and both models' predictions for one
   slice from each of ``--num-examples`` test series (evenly spread over the
   sorted series), using the slice with the largest ground-truth prostate area.
+  Each prediction is followed by a prostate difference overlay: correctly
+  found prostate (TP), predicted prostate that is not prostate (FP) and
+  missed prostate (FN).
 * Failure cases: the prostate-containing test slices where the Improved U-Net
   (the main model) has the lowest slice-level prostate Dice, at most one
   slice per series so the cases do not come from neighbouring slices. Many
@@ -26,10 +29,16 @@ slices to display; nothing is selected or tuned on them.
 * Inference time: forward passes only, with the whole test split already on
   the device and one warm-up pass first; the median of ``--timing-repeats``
   passes is reported for batch size 1 and for ``--batch-size``.
+* 2.5D experiment: ``--models`` names the run folders to compare (the model
+  type and the number of context slices are read from each checkpoint), and
+  ``--split validation`` runs the same analysis on the validation split, so
+  the 2.5D run can be judged without the test split. On validation the
+  consistency check compares with the validation Dice saved in history.json.
 
-Example::
+Examples::
 
     python predict.py --data-root keras_slices_data --runs-dir runs
+    python predict.py --split validation --models unet improved improved_25d
 """
 
 import argparse
@@ -48,11 +57,13 @@ from modules import build_model, count_parameters
 
 # Model names used by train.py and the labels shown in figures.
 MODELS = {"unet": "Baseline U-Net", "improved": "Improved U-Net"}
-MAIN_MODEL = "improved"  # failure cases are chosen for this model
+MAIN_MODEL = "improved"  # failure cases are chosen for this run folder
 # Overlay colours for labels 1-5 (Body, Bones, Bladder, Rectum, Prostate);
 # Background (0) is left transparent.
 CLASS_COLOURS = ("#8d99ae", "#f4d35e", "#3a86ff", "#2a9d8f", "#e63946")
 OUTLINE_COLOUR = "lime"  # ground-truth prostate outline on the prediction panels
+# Prostate difference overlay (Okabe-Ito colours, readable with colour blindness).
+DIFF_COLOURS = {"TP": "#009e73", "FP": "#d55e00", "FN": "#56b4e9"}
 
 
 def parse_args():
@@ -60,9 +71,14 @@ def parse_args():
     parser.add_argument("--data-root", default="keras_slices_data")
     parser.add_argument("--runs-dir", default="runs",
                         help="folder holding the unet/ and improved/ output folders of train.py")
+    parser.add_argument("--models", nargs="+", default=list(MODELS),
+                        help="run folders inside --runs-dir to compare")
+    parser.add_argument("--split", choices=["test", "validation"], default="test")
     parser.add_argument("--checkpoint", choices=["best", "last"], default="best",
                         help="best = validation-selected checkpoint (the primary result)")
-    parser.add_argument("--out-dir", default=None, help="default: <runs-dir>/predict_<checkpoint>")
+    parser.add_argument("--out-dir", default=None,
+                        help="default: <runs-dir>/predict_<checkpoint> for the test split, "
+                             "<runs-dir>/predict_validation_<checkpoint> for validation")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-examples", type=int, default=4)
     parser.add_argument("--num-failures", type=int, default=5)
@@ -71,21 +87,48 @@ def parse_args():
     args = parser.parse_args()
     if min(args.batch_size, args.num_examples, args.num_failures, args.timing_repeats) < 1:
         parser.error("--batch-size, --num-examples, --num-failures and --timing-repeats must be >= 1")
+    if len(set(args.models)) != len(args.models):
+        parser.error("--models must not repeat a run folder")
     return args
 
 
-def load_model(name, path, device):
-    """Rebuild a model and load the weights saved by train.py."""
+def load_model(path, device):
+    """Rebuild a model from its saved training config and load the weights saved by train.py.
+
+    Returns the model, the checkpoint epoch, the model type and the number
+    of context slices (0 for runs made before the 2.5D option existed).
+    """
     state = torch.load(path, map_location=device, weights_only=True)
-    model = build_model(name).to(device)
+    model_type = state["config"]["model"]
+    context_slices = state["config"].get("context_slices", 0)
+    model = build_model(model_type, in_channels=2 * context_slices + 1).to(device)
     model.load_state_dict(state["model"])
     model.eval()  # dropout off; the baseline's batch norm uses its running statistics
-    return model, state["epoch"]
+    return model, state["epoch"], model_type, context_slices
+
+
+def model_label(model_type, context_slices):
+    """Figure label, e.g. "Improved U-Net" or "Improved U-Net 2.5D (3 slices)"."""
+    if context_slices == 0:
+        return MODELS[model_type]
+    return f"{MODELS[model_type]} 2.5D ({2 * context_slices + 1} slices)"
+
+
+def saved_dice(model_dir, split, checkpoint, epoch):
+    """The per-series prostate Dice train.py saved for this checkpoint, or None."""
+    if split == "test":
+        path = model_dir / f"test_metrics_{checkpoint}.json"
+        return json.loads(path.read_text())["prostate_dice_series_mean"] if path.is_file() else None
+    path = model_dir / "history.json"
+    if not path.is_file():
+        return None
+    records = [h for h in json.loads(path.read_text()) if h["epoch"] == epoch]
+    return records[0]["val_prostate_dice"] if records else None
 
 
 @torch.inference_mode()
 def predict_labels(model, images, device, use_amp, batch_size):
-    """Return predicted label maps (N, H, W) for images of shape (N, 1, H, W)."""
+    """Return predicted label maps (N, H, W) for images of shape (N, C, H, W)."""
     predictions = []
     for batch in images.split(batch_size):
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
@@ -247,8 +290,20 @@ def _format_dice(value):
     return "n/a" if value is None else f"{value:.3f}"
 
 
-def save_figure(indices, images, labels, predictions, dice, keys, path, title):
-    """Save one row per slice: MRI, ground truth, then each model's prediction."""
+def difference_map(prediction, truth):
+    """Prostate difference map: 0 neither, 1 TP, 2 FP (predicted only), 3 FN (missed)."""
+    pred = prediction == PROSTATE_LABEL
+    target = truth == PROSTATE_LABEL
+    return np.select([pred & target, pred & ~target, ~pred & target], [1, 2, 3], default=0)
+
+
+def save_figure(indices, images, labels, predictions, dice, keys, names, path, title):
+    """Save one row per slice: MRI, ground truth, then each model's prediction and
+    its prostate difference overlay (TP / FP / FN).
+
+    ``images`` holds the network input; for 2.5D input only the middle
+    (target) channel is shown. ``names`` maps each run folder to its label.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -257,36 +312,47 @@ def save_figure(indices, images, labels, predictions, dice, keys, path, title):
     from matplotlib.patches import Patch
 
     cmap = ListedColormap(CLASS_COLOURS)
-    columns = 2 + len(predictions)
+    diff_cmap = ListedColormap([DIFF_COLOURS[k] for k in ("TP", "FP", "FN")])
+    columns = 2 + 2 * len(predictions)
     fig, axes = plt.subplots(len(indices), columns, figsize=(2.2 * columns, 3.9 * len(indices)),
                              squeeze=False)
     for row, index in enumerate(indices):
-        image = images[index, 0].numpy()
+        image = images[index, images.shape[1] // 2].numpy()
         truth = labels[index].numpy()
         case, week, slice_index = keys[index]
-        label_maps = [None, truth, *(p[index].numpy() for p in predictions.values())]
-        captions = [f"Case {case} / week {week} / slice {slice_index}\n"
-                    f"GT prostate {int((truth == PROSTATE_LABEL).sum())} px",
-                    "Ground truth",
-                    *(f"{MODELS[name]}\nprostate Dice {_format_dice(dice[name][index])}"
-                      for name in predictions)]
-        for column, (label_map, caption) in enumerate(zip(label_maps, captions)):
+        panels = [(None, None, f"Case {case} / week {week} / slice {slice_index}\n"
+                               f"GT prostate {int((truth == PROSTATE_LABEL).sum())} px"),
+                  (truth, None, "Ground truth")]
+        for name, prediction in predictions.items():
+            label_map = prediction[index].numpy()
+            diff = difference_map(label_map, truth)
+            panels.append((label_map, None,
+                           f"{names[name]}\nprostate Dice {_format_dice(dice[name][index])}"))
+            panels.append((None, diff, f"{names[name]}\nFP {int((diff == 2).sum())} px, "
+                                       f"FN {int((diff == 3).sum())} px"))
+        for column, (label_map, diff, caption) in enumerate(panels):
             ax = axes[row, column]
             ax.imshow(image, cmap="gray")
             if label_map is not None:
                 # Labels 1-5 map onto the 5 colours; label 0 is masked out.
                 ax.imshow(np.ma.masked_equal(label_map, 0), cmap=cmap, vmin=0.5, vmax=5.5,
                           alpha=0.45, interpolation="nearest")
-            if column >= 2 and (truth == PROSTATE_LABEL).any():
-                ax.contour(truth == PROSTATE_LABEL, levels=[0.5], colors=OUTLINE_COLOUR,
-                           linewidths=0.8)
+                if column >= 2 and (truth == PROSTATE_LABEL).any():
+                    ax.contour(truth == PROSTATE_LABEL, levels=[0.5], colors=OUTLINE_COLOUR,
+                               linewidths=0.8)
+            if diff is not None:
+                ax.imshow(np.ma.masked_equal(diff, 0), cmap=diff_cmap, vmin=0.5, vmax=3.5,
+                          alpha=0.8, interpolation="nearest")
             ax.set_title(caption, fontsize=8)
             ax.axis("off")
 
     handles = [Patch(color=colour, alpha=0.6, label=name)
                for colour, name in zip(CLASS_COLOURS, CLASS_NAMES[1:])]
     handles.append(Line2D([], [], color=OUTLINE_COLOUR, label="ground-truth prostate outline"))
-    fig.legend(handles=handles, loc="lower center", ncol=3, fontsize=8)
+    handles += [Patch(color=DIFF_COLOURS["TP"], label="prostate TP (found)"),
+                Patch(color=DIFF_COLOURS["FP"], label="prostate FP (predicted, not prostate)"),
+                Patch(color=DIFF_COLOURS["FN"], label="prostate FN (missed)")]
+    fig.legend(handles=handles, loc="lower center", ncol=5, fontsize=8)
     fig.suptitle(title, fontsize=10)
     fig.tight_layout(rect=(0, 0.06, 1, 0.97))
     fig.savefig(path, dpi=120)
@@ -296,51 +362,68 @@ def save_figure(indices, images, labels, predictions, dice, keys, path, title):
 def main():
     args = parse_args()
     runs_dir = Path(args.runs_dir)
-    out_dir = Path(args.out_dir or runs_dir / f"predict_{args.checkpoint}")
+    default_name = (f"predict_{args.checkpoint}" if args.split == "test"
+                    else f"predict_{args.split}_{args.checkpoint}")
+    out_dir = Path(args.out_dir or runs_dir / default_name)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda" and not args.no_amp
     torch.backends.cudnn.benchmark = True  # as in train.py
 
-    # The test split with the same preprocessing as in train.py (no augmentation).
-    dataset = HipMRISliceDataset(args.data_root, "test")
-    samples = [dataset[i] for i in range(len(dataset))]
-    images = torch.stack([s["image"] for s in samples])  # (N, 1, H, W)
+    # The chosen split with the same preprocessing as in train.py (no augmentation).
+    # One input tensor per number of context slices; labels and keys are shared.
+    inputs = {}
+
+    def split_images(context_slices):
+        if context_slices not in inputs:
+            dataset = HipMRISliceDataset(args.data_root, args.split,
+                                         context_slices=context_slices)
+            inputs[context_slices] = [dataset[i] for i in range(len(dataset))]
+        return torch.stack([s["image"] for s in inputs[context_slices]])  # (N, C, H, W)
+
+    images = split_images(0)
+    samples = inputs[0]
     labels = torch.stack([s["label"] for s in samples])  # (N, H, W)
     keys = [(s["case"], s["week"], s["slice"]) for s in samples]
 
     report = {
         "device": torch.cuda.get_device_name(0) if device.type == "cuda" else platform.processor(),
         "torch": str(torch.__version__), "python": platform.python_version(), "amp": use_amp,
-        "checkpoint": args.checkpoint, "test_slices": len(samples), "models": {},
+        "checkpoint": args.checkpoint, "split": args.split, "slices": len(samples), "models": {},
     }
     end_distance = distance_to_prostate_end(keys, labels)
-    predictions, dice = {}, {}
-    for name in MODELS:
+    predictions, dice, names = {}, {}, {}
+    for name in args.models:
         model_dir = runs_dir / name
-        model, epoch = load_model(name, model_dir / f"{args.checkpoint}.pt", device)
-        predictions[name] = predict_labels(model, images, device, use_amp, args.batch_size)
+        model, epoch, model_type, context_slices = load_model(
+            model_dir / f"{args.checkpoint}.pt", device)
+        names[name] = model_label(model_type, context_slices)
+        model_images = split_images(context_slices)
+        model_keys = [(s["case"], s["week"], s["slice"]) for s in inputs[context_slices]]
+        if model_keys != keys:
+            raise RuntimeError(f"{name}: slice order differs from the 2D dataset")
+        predictions[name] = predict_labels(model, model_images, device, use_amp, args.batch_size)
         dice[name] = prostate_dice_per_slice(predictions[name], labels)
 
         # Recompute the primary metric to check that the reloaded model matches train.py.
         metrics = SegmentationMetrics()
         metrics.update(predictions[name], labels, *zip(*keys))
         recomputed = metrics.summary()["prostate_dice_series_mean"]
-        saved_path = model_dir / f"test_metrics_{args.checkpoint}.json"
-        saved = (json.loads(saved_path.read_text())["prostate_dice_series_mean"]
-                 if saved_path.is_file() else None)
+        saved = saved_dice(model_dir, args.split, args.checkpoint, epoch)
 
-        timing = [time_inference(model, images, device, use_amp, batch_size, args.timing_repeats)
+        timing = [time_inference(model, model_images, device, use_amp, batch_size,
+                                 args.timing_repeats)
                   for batch_size in (1, args.batch_size)]
         boundary = boundary_analysis(predictions[name], labels, dice[name], end_distance)
         report["models"][name] = {
+            "label": names[name], "model": model_type, "context_slices": context_slices,
             "checkpoint_epoch": epoch, "parameters": count_parameters(model),
-            "test_prostate_dice_recomputed": recomputed, "test_prostate_dice_saved": saved,
+            "prostate_dice_recomputed": recomputed, "prostate_dice_saved": saved,
             "timing": timing, "boundary": boundary,
         }
-        print(f"{MODELS[name]} ({args.checkpoint}, epoch {epoch}): test prostate Dice "
-              f"per-series mean {recomputed:.4f} (saved by train.py: "
+        print(f"{names[name]} [{name}] ({args.checkpoint}, epoch {epoch}): {args.split} "
+              f"prostate Dice per-series mean {recomputed:.4f} (saved by train.py: "
               f"{'n/a' if saved is None else f'{saved:.4f}'})")
         for t in timing:
             print(f"  batch {t['batch_size']:2d}: {t['ms_per_slice']:.3f} ms/slice, "
@@ -358,14 +441,18 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
+    main_model = MAIN_MODEL if MAIN_MODEL in predictions else args.models[0]
+    split_name = "Test" if args.split == "test" else "Validation"
     examples = choose_examples(keys, labels, args.num_examples)
-    failures = choose_failures(keys, labels, dice[MAIN_MODEL], args.num_failures)
-    save_figure(examples, images, labels, predictions, dice, keys, out_dir / "comparison.png",
-                f"Test slices with the largest ground-truth prostate area in each shown series "
-                f"({args.checkpoint} checkpoints)")
-    save_figure(failures, images, labels, predictions, dice, keys, out_dir / "failures.png",
-                f"Lowest {MODELS[MAIN_MODEL]} prostate Dice on test slices, one per series "
-                f"({args.checkpoint} checkpoints)")
+    failures = choose_failures(keys, labels, dice[main_model], args.num_failures)
+    save_figure(examples, images, labels, predictions, dice, keys, names,
+                out_dir / "comparison.png",
+                f"{split_name} slices with the largest ground-truth prostate area in each shown "
+                f"series ({args.checkpoint} checkpoints)")
+    save_figure(failures, images, labels, predictions, dice, keys, names,
+                out_dir / "failures.png",
+                f"Lowest {names[main_model]} prostate Dice on {split_name.lower()} slices, "
+                f"one per series ({args.checkpoint} checkpoints)")
 
     def describe(i):
         case, week, slice_index = keys[i]
@@ -375,13 +462,14 @@ def main():
                                          for n, p in predictions.items()},
                 "prostate_dice": {n: d[i] for n, d in dice.items()}}
 
+    report["failures_chosen_for"] = main_model
     report["examples"] = [describe(i) for i in examples]
     report["failures"] = [describe(i) for i in failures]
     (out_dir / "predict_summary.json").write_text(json.dumps(report, indent=2))
-    print("Failure cases:")
+    print(f"Failure cases (chosen for {names[main_model]}):")
     for f in report["failures"]:
         print(f"  {f['series']} slice {f['slice']}: GT {f['gt_prostate_pixels']} px, Dice "
-              + ", ".join(f"{MODELS[n]} {_format_dice(d)}" for n, d in f["prostate_dice"].items()))
+              + ", ".join(f"{names[n]} {_format_dice(d)}" for n, d in f["prostate_dice"].items()))
     print(f"Saved comparison.png, failures.png and predict_summary.json to {out_dir}")
 
 
