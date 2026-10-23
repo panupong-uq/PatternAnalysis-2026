@@ -278,7 +278,7 @@ The last-epoch checkpoints (epoch 40) were also tested, as planned before traini
 
 ## 6. Investigation of the open research dilemma
 
-The HipMRI dilemma in the assignment asks whether a good global Dice hides failures at the base and apex slices, or leakage into the rectum or bladder. It also asks whether more spatial context removes these errors or only improves easy central slices. This section benchmarks the two models, profiles their cost, dissects their failures and ends with a recommendation.
+The HipMRI dilemma in the assignment asks whether a good global Dice hides failures at the base and apex slices, or leakage into the rectum or bladder. It also asks whether more spatial context removes these errors or only improves easy central slices. This section benchmarks the two models, profiles their cost, dissects their failures, gives a recommendation and closes with future work.
 
 ### 6.1 Quantitative benchmark
 
@@ -401,7 +401,17 @@ HD95 is defined only on slices where a prostate was predicted. For example, at d
   - Where GPU memory allows, prefer the baseline 2D U-Net, which scored higher on the primary metric and on every foreground class.
   - Choose the Improved U-Net only when memory or batched throughput is the binding constraint.
   - With either model, a contouring pipeline should send the outermost predicted prostate slice at each end, and the two to three slices beyond it, for manual review. Both models miss the true outermost slice in 12 of 18 cases, and every missed slice is within 2 slices of a true end (within 1 for the baseline). How far the predicted range falls short of the true range was not measured, and this margin was read from the test-split analysis, so it should be confirmed on validation or new data before use.
-- **Next experiment:** add inter-slice context, either as neighbouring slices given as extra input channels (2.5D) or as a 3D model. Evaluate it with the same distance-from-end breakdown and HD95, together with the measured memory cost, to see whether it fixes the end-slice failures that the 2D models share.
+- **Next experiment:** add inter-slice context, either as neighbouring slices given as extra input channels (2.5D) or as a 3D model. Evaluate it with the same distance-from-end breakdown and HD95, together with the measured memory cost, to see whether it fixes the end-slice failures that the 2D models share. Section 6.5 lists this and two other directions.
+
+### 6.5 Future work
+
+These directions follow from the failure analysis. None of them was tried in this project, so they are proposals, not results.
+
+1. **Inter-slice context (first priority).** The misses are confined to the ends of the gland, where one slice shows little prostate. The smallest change is a 2.5D input: the previous, current and next slices as three input channels, predicting the middle slice. The larger one is a 3D U-Net (Çiçek et al., 2016), which applies the same encoder-decoder design to whole volumes. The 2.5D variant is this report's proposal, not a method from that paper. Both need the slice order within each series to be checked, and both cost more memory.
+2. **Boundary-aware loss.** The boundary loss of Kervadec et al. (2019) is a distance measure on contours rather than a sum over regions, and it was proposed for highly unbalanced segmentation. Added to the Dice loss, it could target boundary errors on small prostate areas without adding parameters. It does not add inter-slice information. Its weight relative to the Dice loss, and its handling of slices without prostate, would have to be set on validation.
+3. **Attention gates.** Attention U-Net (Oktay et al., 2018) adds gates to the skip connections that learn to suppress irrelevant regions and emphasise features useful for the task. It was shown on abdominal CT (pancreas), so its benefit on pelvic MRI is untested. Adding it would make a third model, not the Improved U-Net of Isensee et al.
+
+Each variant should be compared under the same rules as in this report: settings chosen on validation only, and evaluation by prostate Dice, missed slices by distance from the ends of the gland, HD95 and measured memory cost. The test split of this project has already been used, so confirming an improvement needs new held-out data that has not informed any decision.
 
 ## 7. Reproducibility and usage
 
@@ -493,15 +503,19 @@ The commit log records the work as it happened. The main milestones were:
 | 22 Oct | `bb4ab23` | Test results, prediction figures, failure cases and inference timing |
 | 22 Oct | `65b1b63` | Feasibility review added to the README; HD95 boundary analysis |
 | 22 Oct | `33bd8be` | Boundary analysis, dilemma answer and recommendation |
-| 23 Oct | README reorganisation commit | README reorganised into the final report; architecture figure |
+| 23 Oct | `df8e3a0` | README reorganised into the final report; architecture figure |
+| 23 Oct | next commit | Future-work section (Section 6.5) with checked references |
 
 ## 10. Acknowledgements and references
 
 Acknowledgement: data were provided by the HipMRI Study ([CSIRO data collection](https://doi.org/10.25919/45t8-p065)), through the processed 2D slices supplied for COMP3710.
 
+- Ö. Çiçek, A. Abdulkadir, S. S. Lienkamp, T. Brox and O. Ronneberger, "3D U-Net: Learning Dense Volumetric Segmentation from Sparse Annotation", in *Medical Image Computing and Computer-Assisted Intervention - MICCAI 2016*, Lecture Notes in Computer Science, Springer, 2016, pp. 424-432. <https://doi.org/10.1007/978-3-319-46723-8_49>
 - J. Dowling and P. Greer, "Labelled weekly MR images of the male pelvis", CSIRO Data Collection, 2021. <https://doi.org/10.25919/45t8-p065>
 - J. A. Dowling, J. Sun, P. Pichler, D. Rivest-Hénault, S. Ghose, H. Richardson, C. Wratten, J. Martin, J. Arm, L. Best, S. S. Chandra, J. Fripp, F. W. Menk and P. B. Greer, "Automatic Substitute Computed Tomography Generation and Contouring for Magnetic Resonance Imaging (MRI)-Alone External Beam Radiation Therapy From Standard MRI Sequences", *International Journal of Radiation Oncology, Biology, Physics*, 93(5), 1144-1153, 2015. <https://doi.org/10.1016/j.ijrobp.2015.08.045>
 - F. Isensee, P. Kickingereder, W. Wick, M. Bendszus and K. H. Maier-Hein, "Brain Tumor Segmentation and Radiomics Survival Prediction: Contribution to the BRATS 2017 Challenge", in *Brainlesion: Glioma, Multiple Sclerosis, Stroke and Traumatic Brain Injuries* (BrainLes 2017), Lecture Notes in Computer Science, Springer, 2018, pp. 287-297. <https://doi.org/10.1007/978-3-319-75238-9_25>
+- H. Kervadec, J. Bouchtiba, C. Desrosiers, E. Granger, J. Dolz and I. Ben Ayed, "Boundary loss for highly unbalanced segmentation", in *Proceedings of the 2nd International Conference on Medical Imaging with Deep Learning* (MIDL 2019), Proceedings of Machine Learning Research, vol. 102, 2019, pp. 285-296. <https://proceedings.mlr.press/v102/kervadec19a.html>
+- O. Oktay, J. Schlemper, L. Le Folgoc, M. Lee, M. Heinrich, K. Misawa, K. Mori, S. McDonagh, N. Y. Hammerla, B. Kainz, B. Glocker and D. Rueckert, "Attention U-Net: Learning Where to Look for the Pancreas", arXiv:1804.03999, 2018 (accepted to MIDL 2018). <https://arxiv.org/abs/1804.03999>
 - O. Ronneberger, P. Fischer and T. Brox, "U-Net: Convolutional Networks for Biomedical Image Segmentation", in *Medical Image Computing and Computer-Assisted Intervention - MICCAI 2015*, Lecture Notes in Computer Science, Springer, 2015, pp. 234-241. <https://doi.org/10.1007/978-3-319-24574-4_28>
 
 ## Artificial Intelligence Usage Disclosure
@@ -523,6 +537,6 @@ The AI-suggested code was verified in four ways:
 - comparing the metrics with an independent NumPy reference on synthetic data;
 - running synthetic end-to-end training/resume/test checks on CPU.
 
-OpenAI Codex also assisted with the Colab execution guidance and the Colab T4 timing update (21 October 2026), using the console outputs supplied by the user. Claude Code summarised the Rangpur run files supplied by the user for the training, test, prediction and boundary-analysis results, and described the figures. It also drafted the answer to the research dilemma and the engineering recommendation, which the user reviewed. The HD95 code was checked against a NumPy brute-force reference on synthetic masks, and the figure files of the two `predict.py` runs were byte-compared locally. The architecture diagram was checked against the layer definitions in `modules.py`.
+OpenAI Codex also assisted with the Colab execution guidance and the Colab T4 timing update (21 October 2026), using the console outputs supplied by the user. OpenAI ChatGPT suggested the papers behind the future-work directions in Section 6.5 (23 October 2026); Claude Code checked those references against Crossref, arXiv and PMLR and drafted the section. Claude Code summarised the Rangpur run files supplied by the user for the training, test, prediction and boundary-analysis results, and described the figures. It also drafted the answer to the research dilemma and the engineering recommendation, which the user reviewed. The HD95 code was checked against a NumPy brute-force reference on synthetic masks, and the figure files of the two `predict.py` runs were byte-compared locally. The architecture diagram was checked against the layer definitions in `modules.py`.
 
 All training, validation, test and prediction results (the Colab timing runs and the Rangpur jobs) come from runs the user executed. The AI did not train, evaluate or run inference with the reported models. It ran only local checks: the mask comparison, the dataset audit, the synthetic CPU checks on random data (including the HD95 reference check), a layer and parameter count of the untrained models, the byte-comparison of the `predict.py` figure files, and the script that draws Figure 1 (which builds no model). The AI derived summary figures such as gaps, counts and pixel medians from the result files the user supplied, and the derived per-series inference times in Section 6.2.
