@@ -578,7 +578,7 @@ The commit log records the work as it happened. The main milestones were:
 | 23 Oct | `775d8c1` | Future-work section (now Section 6.6) with checked references |
 | 23 Oct | `6552d29` | Related published work (PROMISE12, Rodrigues et al., Zhang et al.) and the exact metric definition |
 | 23 Oct | `bb98a72` | Optional 2.5D input, difference overlays in `predict.py`, validation-split analysis |
-| 26 Oct | next commit | Figures with difference overlays; 2.5D follow-up experiment with validation and secondary test results (Section 6.4) |
+| 26 Oct | `d940879` | Figures with difference overlays; 2.5D follow-up experiment with validation and secondary test results (Section 6.4) |
 
 ## 10. Acknowledgements and references
 
