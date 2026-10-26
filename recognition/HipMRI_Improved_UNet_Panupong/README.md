@@ -1,6 +1,6 @@
 # HipMRI 2D Improved U-Net - Panupong
 
-This COMP3710 project segments the prostate, together with the body, bones, bladder and rectum, in 2D slices of male pelvic MRI from the HipMRI study. It compares two networks implemented from scratch in PyTorch: a 2D adaptation of the Improved U-Net of Isensee et al. (2018), the chosen Normal-difficulty model, and a standard 2D U-Net (Ronneberger et al., 2015) as the baseline. Both models were trained under the same rules on the course's Rangpur cluster and tested once on the supplied test split. **Both exceed the target prostate test Dice of 0.75:** 0.8858 for the baseline and 0.8738 for the Improved U-Net. The report then investigates the HipMRI open research dilemma: where the remaining errors are, and which model to recommend.
+This COMP3710 project segments the prostate, together with the body, bones, bladder and rectum, in 2D slices of male pelvic MRI from the HipMRI study. It compares two networks implemented from scratch in PyTorch: a 2D adaptation of the Improved U-Net of Isensee et al. (2018), the chosen Normal-difficulty model, and a standard 2D U-Net (Ronneberger et al., 2015) as the baseline. Both models were trained under the same rules on the course's Rangpur cluster and tested once on the supplied test split. **Both exceed the target prostate test Dice of 0.75:** 0.8858 for the baseline and 0.8738 for the Improved U-Net. The report then investigates the HipMRI open research dilemma: where the remaining errors are, whether three-slice (2.5D) context removes them (in a single training run it did not fix the outermost slice of the gland), and which model to recommend.
 
 | Result (test split, validation-selected checkpoints) | Baseline U-Net | Improved U-Net |
 | --- | ---: | ---: |
@@ -147,6 +147,7 @@ These rules were set before any training:
 - **Loss:** both models use the multiclass soft Dice loss of Isensee et al. (2018, Eq. 1), summed over the whole batch. The batch size is at least 8.
 - **Empty masks:** Dice is undefined (excluded from the mean and counted) when both the prediction and the ground truth are empty, and 0 when only the prediction is non-empty. Every validation and test series contains prostate.
 - **Primary metric:** 3D prostate Dice per case/week series, averaged over series. The argmax label maps of the 60 slices of a series are stacked into one volume, and Dice = 2|P ∩ G| / (|P| + |G|) is computed on the prostate label of that volume; the soft Dice is used only as the training loss. It is also used for validation checkpoint selection. The global, case-weighted, per-class Dice/IoU and slice-level metrics are reported alongside it.
+- **2.5D input (follow-up experiment only):** for the experiment in Section 6.4, the two neighbouring slices of the same series are added as extra input channels. Each channel is normalised as above, and all channels get the same augmentation. The main results use single 2D slices.
 
 ### Data pipeline check
 
@@ -266,19 +267,19 @@ The last-epoch checkpoints (epoch 40) were also tested, as planned before traini
 
 ### Example inputs and outputs
 
-`predict.py` reloads the validation-selected checkpoints and the test split, predicts every test slice and draws the figures below. It was run on Rangpur as job 685612 (node `a100-4`, NVIDIA A100-PCIE-40GB, code at commit `b7d4fba`, 1 min 7 s); the user ran the job and copied the outputs back.
+`predict.py` reloads the validation-selected checkpoints and the test split, predicts every test slice and draws the figures below. It was first run on Rangpur as job 685612 (node `a100-4`, NVIDIA A100-PCIE-40GB, code at commit `b7d4fba`, 1 min 7 s). The figures shown here come from a later run, job 690027 (node `a100-7`, code at commit `bb98a72`, 1 min 6 s), which added a difference overlay after each prediction; it selected the same slices, with the same slice Dice values, and reproduced the saved test Dice to four decimal places. The user ran both jobs and copied the outputs back.
 
-**Consistency check.** The test prostate Dice recomputed by `predict.py` was 0.8858 for the baseline and 0.8738 for the Improved U-Net. These agree with the values saved by `train.py` when rounded to four decimal places. The absolute differences are about 0.00001: 8e-6 for the baseline and 1.5e-5 for the Improved U-Net. This indicates that the reloaded models and the preprocessing match the test evaluation. The tiny difference is consistent with non-deterministic GPU arithmetic: `cudnn.benchmark` is on, mixed precision is used, and this run was on a different A100 node (`a100-4` rather than `a100-5`). This cause was not tested separately.
+**Consistency check.** The test prostate Dice recomputed by `predict.py` was 0.8858 for the baseline and 0.8738 for the Improved U-Net. These agree with the values saved by `train.py` when rounded to four decimal places. The absolute differences are about 0.00001: 8e-6 for the baseline and 1.5e-5 (job 685612) or 1.9e-5 (job 690027) for the Improved U-Net. This indicates that the reloaded models and the preprocessing match the test evaluation. The tiny difference is consistent with non-deterministic GPU arithmetic: `cudnn.benchmark` is on, mixed precision is used, and these runs were on different A100 nodes from the test evaluation (`a100-5`). This cause was not tested separately.
 
-**Visual comparison** (Figure 2). For each of 4 test series, spread evenly over the sorted series, the figure shows the slice with the largest ground-truth prostate. The columns are the input MRI, the ground truth and the two predictions. The thin bright-green (lime) line on the two prediction columns is the ground-truth prostate outline; the darker green-teal fill is the rectum. The outline serves as the difference overlay for the prostate: predicted prostate fill outside the outline is a false positive, and area inside the outline without prostate fill is a false negative. On these slices, both models outline the prostate, bladder and bones closely: prostate Dice is 0.92-0.96 for the baseline and 0.90-0.94 for the Improved U-Net.
+**Visual comparison** (Figure 2). For each of 4 test series, spread evenly over the sorted series, the figure shows the slice with the largest ground-truth prostate. The columns are the input MRI and the ground truth, then, for each model, its prediction followed by a prostate difference overlay. In the overlay, green marks prostate pixels found correctly (true positives), orange marks predicted prostate that is not prostate (false positives) and light blue marks missed prostate (false negatives); the panel title gives the false-positive and false-negative pixel counts. On the prediction panels, the thin bright-green (lime) line is the ground-truth prostate outline and the semi-transparent teal fill is the rectum; it is lighter than the solid green that marks correctly found prostate in the overlay panels. On these slices, both models outline the prostate, bladder and bones closely: prostate Dice is 0.92-0.96 for the baseline and 0.90-0.94 for the Improved U-Net.
 
 ![Figure 2: test predictions of both models](figures/test_comparison.png)
 
-*Figure 2. Example test inputs, ground truth and predictions of both models.*
+*Figure 2. Example test inputs, ground truth, and each model's prediction followed by its prostate difference overlay (green true positive, orange false positive, light blue false negative).*
 
 ## 6. Investigation of the open research dilemma
 
-The HipMRI dilemma in the assignment asks whether a good global Dice hides failures at the base and apex slices, or leakage into the rectum or bladder. It also asks whether more spatial context removes these errors or only improves easy central slices. This section benchmarks the two models, profiles their cost, dissects their failures, gives a recommendation and closes with future work.
+The HipMRI dilemma in the assignment asks whether a good global Dice hides failures at the base and apex slices, or leakage into the rectum or bladder. It also asks whether more spatial context removes these errors or only improves easy central slices. This section benchmarks the two models, profiles their cost, dissects their failures, tests whether three-slice (2.5D) context fixes them, gives a recommendation and closes with future work.
 
 ### 6.1 Quantitative benchmark
 
@@ -302,7 +303,7 @@ A more elaborate U-Net is not guaranteed to beat a well-trained baseline. Rodrig
 | Peak GPU memory, inference at batch size 16 | 0.62 GiB | 0.26 GiB |
 | Derived: one 60-slice series at batch size 16 / 1 | about 38 / 184 ms | about 28 / 448 ms |
 
-All measurements were made on an NVIDIA A100-PCIE-40GB on Rangpur. Training values come from the training runs (jobs 683616 and 683615). Inference values come from `predict.py` job 685612: forward passes only, mixed precision, test images already on the GPU, median of 5 passes over the 540 test slices after one warm-up pass. The derived row multiplies the per-slice time by 60 and was not timed directly. The inference peak memory includes the model weights and the 540 test images held on the GPU (about 0.07 GiB). A second `predict.py` run (job 685882) re-measured inference times within about 4% of these values.
+All measurements were made on an NVIDIA A100-PCIE-40GB on Rangpur. Training values come from the training runs (jobs 683616 and 683615). Inference values come from `predict.py` job 685612: forward passes only, mixed precision, test images already on the GPU, median of 5 passes over the 540 test slices after one warm-up pass. The derived row multiplies the per-slice time by 60 and was not timed directly. The inference peak memory includes the model weights and the 540 test images held on the GPU (about 0.07 GiB). Four later `predict.py` runs (jobs 685882, 690027, 696531 and 697982; 696531 on the validation split) re-measured inference times within about 8% of these values.
 
 - The Improved U-Net uses about 10 times fewer parameters, about 17% less time per training batch and about 60% less peak training memory.
 - At batch size 16, it is about 27% faster per slice and uses less than half the inference memory.
@@ -329,7 +330,7 @@ These are timing experiments only, not training results; the test split was not 
 
 ![Figure 3: failure cases](figures/test_failures.png)
 
-*Figure 3. Failure cases: five of the 22 test slices where the Improved U-Net scores 0 (at most one per series, larger ground-truth prostate first). As in Figure 2, the lime line is the ground-truth prostate outline, so an outline with no prostate fill inside is a missed (false-negative) prostate.*
+*Figure 3. Failure cases: five of the 22 test slices where the Improved U-Net scores 0 (at most one per series, larger ground-truth prostate first). As in Figure 2, each prediction is followed by its prostate difference overlay; a fully light-blue prostate (and "FP 0 px") means the prostate was missed entirely.*
 
 | Series / slice | Ground-truth prostate (pixels) | Baseline Dice | Improved Dice | Position in the prostate's slice range |
 | --- | ---: | ---: | ---: | --- |
@@ -347,7 +348,7 @@ What the failures show:
 - **The neighbouring organs are still found.** On the largest miss (040 / week 0 / 37, Figure 3, first row), both models still segment the rectum and the bladder near the prostate, and neither predicts any prostate. Judged from the figure, the rectum prediction extends into the side of the prostate that touches the rectum (roughly a quarter to a third of it). The rest of the thin prostate strip is labelled as body. On this slice, the models find the anatomy around the prostate but do not separate the thin end of the gland from the rectum and the tissue next to it.
 - **Why the 3D Dice stays high.** These edge slices contain few prostate pixels in total, so they lower the per-series 3D Dice only a little. This is why the 3D Dice stays above 0.85 while the slice-level mean is lower.
 
-**Boundary analysis.** To test whether these failures are systematic, a boundary analysis was added to `predict.py`. It was run on Rangpur as job 685882 (node `a100-8`, NVIDIA A100-PCIE-40GB, code at commit `65b1b63`, 1 min 5 s) with the same validation-selected checkpoints; the user ran the job and copied the outputs back. The run reproduced the saved test Dice (0.8858 and 0.8738) and the same five failure cases. Its comparison and failure figures are byte-identical to those of job 685612, so the displayed slices were predicted identically. Elsewhere in the test split a few pixels differed: the recomputed baseline Dice differs from job 685612 in the sixth decimal place, which is consistent with non-deterministic GPU arithmetic.
+**Boundary analysis.** To test whether these failures are systematic, a boundary analysis was added to `predict.py`. It was run on Rangpur as job 685882 (node `a100-8`, NVIDIA A100-PCIE-40GB, code at commit `65b1b63`, 1 min 5 s) with the same validation-selected checkpoints; the user ran the job and copied the outputs back. The run reproduced the saved test Dice (0.8858 and 0.8738) and the same five failure cases. Its comparison and failure figures are byte-identical to those of job 685612, so the displayed slices were predicted identically. Elsewhere in the test split a few pixels differed: the recomputed baseline Dice differs from job 685612 in the sixth decimal place, which is consistent with non-deterministic GPU arithmetic. Job 690027, which drew Figures 2 and 3, printed the same boundary results as job 685882 at the printed precision; the saved full-precision values differ by less than 2e-5, again consistent with non-deterministic GPU arithmetic.
 
 HD95 is in pixels and position in the gland is counted in slices, because the NIfTI spacing ([1, 1]) has no known units.
 
@@ -391,10 +392,67 @@ HD95 is defined only on slices where a prostate was predicted. For example, at d
   - The central slices dominate these pooled figures, so leakage on the end slices is not measured separately. On the largest miss (Figure 3, first row), part of the gland is labelled rectum.
 - **Physical scale is unknown.** With unknown spacing, a median HD95 of 2 pixels cannot be converted to millimetres or compared with clinical margins.
 
-### 6.4 Answer to the dilemma and recommendation for the project manager
+### 6.4 Follow-up experiment: does inter-slice context fix the ends of the gland?
 
-- **Scope of the answer:** only 2D models were compared, so whether more spatial context (dilated multi-scale networks or true 3D) removes the end-slice failures is not tested here. The evidence is that the failures are confined to the ends of the gland, where a single 2D slice shows very little prostate. Within 2D, the Improved U-Net does not fix them: it is close to the baseline on central slices and worse near the ends.
-- **Accuracy:** on this test split, the baseline 2D U-Net is slightly better: test prostate Dice 0.8858 against 0.8738, and fewer misses near the ends of the gland. Both gaps come from one seed and 3 test patients and were not tested for significance, so they favour the baseline without proving it is more accurate.
+The failure analysis suggests a cause: at the ends of the gland, a single 2D slice shows very little prostate. The smallest way to give the network more context is a 2.5D input (Zhang et al., 2022): the previous, current and next slices of the same series are given to the Improved U-Net as three input channels, and it predicts the middle slice. This is the first future-work direction of Section 6.6, tried with the time left before the deadline.
+
+**Design, fixed before the run.**
+
+- Only the input changes. The neighbouring slices come from the same series; at the first and last slice of a series the end slice is repeated. Each channel is z-scored on its own, as a 2D slice is, and all three channels get the same augmentation. Only the first convolution of the network grows (3,189,570 parameters, 288 more than the 2D model). Everything else is as in the 2D Improved U-Net run: seed 42, 40 epochs, the same optimiser, schedule and loss, and the best checkpoint chosen by validation prostate Dice.
+- Three slices only. No other number of slices or setting was tried.
+- The question is judged on the **validation** split, with the boundary analysis of Section 6.3. The test split is then evaluated once, whatever the validation result.
+- The slice order was checked first. On validation, the mean absolute difference between normalised neighbouring slices is 0.176, against 0.460 for slices five apart, which is consistent with slices stored in anatomical order. With 2.5D input switched off, the data pipeline produces exactly the same samples as before (checked on all validation and test slices and 600 augmented training slices).
+- This experiment was designed after the test failure analysis had been seen, so its test result is secondary and post hoc. The primary results in Section 5 are unchanged.
+
+**Runs.** Training was job 690028 (node `a100-7`, code at commit `bb98a72`, 24 Oct 2026, 05:34-05:55). The validation analysis of all three models was `predict.py` job 696531 (node `a100-9`, 25 Oct 2026, 22:28-22:30), which recomputed each model's saved validation Dice to within 2e-5. The user ran the jobs and copied the outputs back.
+
+**Validation results** (254 validation slices with prostate in 11 series, so 22 slices at each distance 0, 1 and 2; best checkpoints):
+
+| Validation measurement | Baseline U-Net | Improved U-Net (2D) | Improved U-Net 2.5D |
+| --- | ---: | ---: | ---: |
+| Prostate Dice, per-series 3D mean (best epoch) | 0.8686 (28) | 0.8564 (34) | 0.8615 (11) |
+| Mean ± SD over the last 10 epochs | 0.8628 ± 0.0018 | 0.8548 ± 0.0013 | 0.8534 ± 0.0018 |
+| End slice (0): mean slice Dice / missed / median HD95 px | 0.256 / 10 / 3.52 | 0.300 / 8 / 4.64 | 0.265 / 10 / 4.13 |
+| 1 slice from the end | 0.497 / 5 / 5.09 | 0.549 / 4 / 3.90 | 0.529 / 5 / 3.79 |
+| 2 slices from the end | 0.655 / 3 / 4.00 | 0.702 / 3 / 3.27 | 0.676 / 3 / 4.00 |
+| 3 or more (central, 188 slices) | 0.851 / 5 / 2.44 | 0.830 / 7 / 3.00 | 0.840 / 3 / 3.00 |
+| All prostate slices: mean slice Dice / missed | 0.752 / 23 | 0.749 / 22 | 0.749 / 21 |
+| Training + validation time, 40 epochs | 20.4 min | 17.1 min | 18.4 min |
+| Peak training GPU memory (batch 16) | 2.32 GiB | 0.96 GiB | 0.97 GiB |
+| Inference ms per slice, batch 1 / 16 (job 696531) | 3.01 / 0.62 | 7.47 / 0.47 | 7.42 / 0.47 |
+
+"Missed" counts slices where no prostate was predicted at all. Unlike on test, a few central validation slices are also missed.
+
+**Secondary test result.** After the validation analysis, the test split was evaluated once (job 697701, node `a100-9`, 26 Oct 2026, 04:48-04:49), and the same boundary analysis was run on test for all three models (`predict.py` job 697982, `a100-9`, 05:47-05:49; it recomputed the saved test Dice to within 3e-5). As explained above, this result is post hoc.
+
+| Test measurement (secondary) | Baseline U-Net | Improved U-Net (2D) | Improved U-Net 2.5D |
+| --- | ---: | ---: | ---: |
+| Prostate Dice, per-series 3D mean (best checkpoint) | 0.8858 | 0.8738 | 0.8759 |
+| Prostate Dice, last checkpoint (epoch 40) | 0.8884 | 0.8734 | 0.8774 |
+| End slice (0): mean slice Dice / missed / median HD95 px | 0.154 / 12 / 4.00 | 0.156 / 12 / 4.24 | 0.138 / 13 / 6.32 |
+| 1 slice from the end | 0.457 / 5 / 3.00 | 0.308 / 8 / 4.33 | 0.531 / 3 / 4.00 |
+| 2 slices from the end | 0.754 / 0 / 2.02 | 0.655 / 2 / 3.00 | 0.716 / 1 / 3.00 |
+| 3 or more (central, 141 slices) | 0.899 / 0 / 2.00 | 0.887 / 0 / 2.17 | 0.895 / 0 / 2.00 |
+| All 195 prostate slices: mean slice Dice / missed / median HD95 px | 0.776 / 17 / 2.06 | 0.745 / 22 / 2.24 | 0.775 / 17 / 2.00 |
+| Predicted prostate pixels that are truly rectum / bladder | 0.07% / 0.85% | 0.00% / 0.73% | 0.14% / 0.76% |
+
+The baseline and 2D Improved U-Net values repeat Sections 5 and 6.3. At distance 0, HD95 covers only 5 of the 18 slices for the 2.5D model, because it predicts prostate on so few of them.
+
+**Findings.**
+
+- **The outermost slice is not fixed on either split.** With three-slice input, the end slice of the gland is missed slightly more often than with the 2D model: 10 against 8 slices on validation and 13 against 12 on test.
+- **The two splits disagree one and two slices from the end.** On test, the 2.5D model misses fewer of these slices than the 2D Improved U-Net (3 against 8, and 1 against 2) and matches the baseline's 17 missed slices overall. On validation it does not help there (5 against 4, and 3 against 3). With 9 and 11 series and one training run, it cannot be said whether 2.5D input really helps next to the end.
+- **The five failure slices of Figure 3.** On test, the 2.5D model predicts some prostate on all five slices where the 2D Improved U-Net predicted none (Dice 0.28-0.89). On validation, it does so on 3 of the 5 slices picked by the same rule (the 2D Improved U-Net's lowest-Dice slice in 5 series). These slices were chosen as the 2D model's worst cases, so a different model is likely to do better on some of them by chance alone; this is not evidence by itself.
+- **On validation, the slices near the end do not improve.** On the end slice and the two slices next to it, the 2.5D model has a slightly lower mean slice Dice than the 2D Improved U-Net (0.265 against 0.300, 0.529 against 0.549, 0.676 against 0.702) and misses as many or more slices (10 against 8, 5 against 4, 3 against 3).
+- **On validation, it may help in the middle of the gland.** It misses 3 central slices against 7, with a mean central Dice of 0.840 against 0.830. Over all prostate slices, the mean slice Dice is the same (0.749), with 21 against 22 missed slices. On test, no model misses a central slice (central Dice 0.895 against 0.887), and over all prostate slices the 2.5D model is higher (0.775 against 0.745; 17 against 22 missed), mostly because of the slices one and two from the end.
+- **The overall Dice did not really change.** On validation, the best-epoch value is higher (0.8615 against 0.8564), but it comes from an early peak at epoch 11. Averaged over the last 10 epochs, the two runs are the same within their spread (0.8534 against 0.8548). On test, the 2.5D model scores 0.8759 against 0.8738 for the 2D Improved U-Net, still below the baseline's 0.8858.
+- **The extra cost is negligible.** Training took about 8% longer (18.4 against 17.1 min), and peak training memory (0.97 against 0.96 GiB) and inference time were unchanged. Peak inference memory at batch 16 rose from 0.28 to 0.44 GiB on validation (0.26 to 0.39 GiB on test), almost entirely because the two extra input channels of the stored images are held on the GPU.
+- **Limits.** Each model was trained once (one seed). The comparison rests on 11 validation series from 4 patients and 9 test series from 3 patients (7 of them from case 040). The larger first layer also changes how every later layer is randomly initialised, so the comparison includes the effect of a different starting point, much like a different seed. Validation was also used to choose each checkpoint, which makes all validation numbers slightly optimistic. These are observations, not tested differences.
+
+### 6.5 Answer to the dilemma and recommendation for the project manager
+
+- **Scope of the answer:** the baseline and the Improved U-Net were compared as 2D models, and a three-slice (2.5D) Improved U-Net was added as a follow-up (Section 6.4). True 3D models and dilated multi-scale networks were not tested. The evidence is that the failures are concentrated at the ends of the gland, where a single 2D slice shows very little prostate: on test every missed slice is within 2 slices of an end, and on validation 18 (baseline) and 15 (Improved) of the 23 and 22 missed slices are. Within 2D, neither model fixes them. On test the Improved U-Net is worse than the baseline one and two slices from the end; on validation it is slightly better there (mean slice Dice 0.300 / 0.549 / 0.702 against 0.256 / 0.497 / 0.655 at distances 0 / 1 / 2) and slightly worse in the centre (0.830 against 0.851), so the near-end difference between the two 2D models is not consistent across splits. Adding the two neighbouring slices did not fix the outermost slice either; one and two slices in, the validation and test splits disagree.
+- **Accuracy:** on this test split, the baseline 2D U-Net is slightly better: test prostate Dice 0.8858 against 0.8738, and fewer misses near the ends of the gland (on validation the Improved U-Net misses fewer there, Section 6.4). Both gaps come from one seed and 3 test patients and were not tested for significance, so they favour the baseline without proving it is more accurate.
 - **Resources:** the Improved U-Net is far cheaper.
   - It has about 10 times fewer parameters and uses about 60% less training memory.
   - At batch size 16 it takes about 27% less time per slice (0.46 against 0.63 ms).
@@ -402,14 +460,15 @@ HD95 is defined only on slices where a prostate was predicted. For example, at d
 - **Recommendation:**
   - Where GPU memory allows, prefer the baseline 2D U-Net, which scored higher on the primary metric and on every foreground class.
   - Choose the Improved U-Net only when memory or batched throughput is the binding constraint.
-  - With either model, a contouring pipeline should send the outermost predicted prostate slice at each end, and the two to three slices beyond it, for manual review. Both models miss the true outermost slice in 12 of 18 cases, and every missed slice is within 2 slices of a true end (within 1 for the baseline). How far the predicted range falls short of the true range was not measured, and this margin was read from the test-split analysis, so it should be confirmed on validation or new data before use.
-- **Next experiment:** add inter-slice context, either as neighbouring slices given as extra input channels (2.5D) or as a 3D model. Evaluate it with the same distance-from-end breakdown and HD95, together with the measured memory cost, to see whether it fixes the end-slice failures that the 2D models share. Section 6.5 lists this and two other directions.
+  - With either model, a contouring pipeline should send the outermost predicted prostate slice at each end, and the two to three slices beyond it, for manual review. On test, both models miss the true outermost slice in 12 of 18 cases, and every missed slice is within 2 slices of a true end (within 1 for the baseline). On validation (Section 6.4), the outermost slice was missed in 10 (baseline) and 8 (Improved) of 22 cases, the baseline also missed 3 slices two from the end, and both models missed a few central slices (5 and 7 of 188), so this end-slice review would not catch every miss. How far the predicted range falls short of the true range was not measured, and the margin was first read from the test split, so it should be confirmed on new data before use.
+- **Do not expect three-slice input to fix the ends.** In the 2.5D follow-up it cost almost nothing, but the outermost slice was missed slightly more often than before on both splits, and the evidence one and two slices in is contradictory (Section 6.4). On the present evidence it does not remove the need for the manual review of the end slices above.
+- **Next experiments:** repeat the 2.5D comparison with several seeds and new held-out data to settle the slices next to the end, and test a true 3D model, which sees the whole gland, with the same distance-from-end breakdown, HD95 and measured memory cost. Section 6.6 lists this and two other directions.
 
-### 6.5 Future work
+### 6.6 Future work
 
-These directions follow from the failure analysis. None of them was tried in this project, so they are proposals, not results.
+These directions follow from the failure analysis. Apart from the 2.5D input of Section 6.4, none of them was tried in this project, so they are proposals, not results.
 
-1. **Inter-slice context (first priority).** The misses are confined to the ends of the gland, where one slice shows little prostate. The smallest change is a 2.5D input: the previous, current and next slices as three input channels, predicting the middle slice. The larger one is a 3D U-Net (Çiçek et al., 2016), which applies the same encoder-decoder design to whole volumes. The 2.5D variant is not a method from that paper. Zhang et al. (2022) compared such designs on the Medical Segmentation Decathlon prostate data (32 MR volumes): a 3-slice input raised Dice from 0.7222 (2D) to 0.7460, against 0.7677 for a 3D U-Net, and 5 or 7 slices gave no further gain. Their data (multimodal T2 and ADC volumes) and label handling differ from HipMRI, so this motivates the experiment but does not predict its effect here. Both need the slice order within each series to be checked, and both cost more memory.
+1. **Inter-slice context (first priority).** The misses are confined to the ends of the gland, where one slice shows little prostate. The smallest change is a 2.5D input: the previous, current and next slices as three input channels, predicting the middle slice. The larger one is a 3D U-Net (Çiçek et al., 2016), which applies the same encoder-decoder design to whole volumes. The 2.5D variant is not a method from that paper. Zhang et al. (2022) compared such designs on the Medical Segmentation Decathlon prostate data (32 MR volumes): a 3-slice input raised Dice from 0.7222 (2D) to 0.7460, against 0.7677 for a 3D U-Net, and 5 or 7 slices gave no further gain. Their data (multimodal T2 and ADC volumes) and label handling differ from HipMRI, so this motivated the experiment but did not predict its effect here. The 2.5D input was tried in Section 6.4: it did not fix the outermost slice, and its effect one and two slices in differed between validation and test. The 3D U-Net remains untested and costs more memory.
 2. **Boundary-aware loss.** The boundary loss of Kervadec et al. (2019) is a distance measure on contours rather than a sum over regions, and it was proposed for highly unbalanced segmentation. Added to the Dice loss, it could target boundary errors on small prostate areas without adding parameters. It does not add inter-slice information. Its weight relative to the Dice loss, and its handling of slices without prostate, would have to be set on validation.
 3. **Attention gates.** Attention U-Net (Oktay et al., 2018) adds gates to the skip connections that learn to suppress irrelevant regions and emphasise features useful for the task. It was shown on abdominal CT (pancreas), so its benefit on pelvic MRI is untested. Adding it would make a third model, not the Improved U-Net of Isensee et al.
 
@@ -466,7 +525,7 @@ The test split is evaluated only with `--test`, after the full epoch budget. It 
 
 ### Run provenance
 
-Every Rangpur result in this report comes from these runs. The user submitted all Slurm jobs and copied the outputs back. The other reported numbers come from the Colab T4 timing runs of 21 October 2026, run by the user (Section 6.2), and from the local full-dataset audit of 21 October 2026, run by the AI (Sections 1 and 2.6). Times are in AEST (UTC+10).
+Every Rangpur result in this report comes from these runs. The user submitted all Slurm jobs and copied the outputs back. The other reported numbers come from the Colab T4 timing runs of 21 October 2026, run by the user (Section 6.2), from the local full-dataset audit of 21 October 2026, run by the AI (Sections 1 and 2.6), and from the local model-free checks of the 2.5D data option on 23 October 2026, run by the AI (slice order and unchanged 2D samples, Section 6.4). Times are in AEST (UTC+10).
 
 | Run | Slurm job | Node | Code commit | Date and time |
 | --- | --- | --- | --- | --- |
@@ -477,6 +536,11 @@ Every Rangpur result in this report comes from these runs. The user submitted al
 | Test, baseline U-Net | 683766 | `a100-5` | `92f51d4` | 22 Oct 2026, 03:38-03:39 |
 | `predict.py`: figures, consistency check, inference timing | 685612 | `a100-4` | `b7d4fba` | 22 Oct 2026, 16:46-16:47 |
 | `predict.py`: boundary analysis | 685882 | `a100-8` | `65b1b63` | 22 Oct 2026, 17:49-17:50 |
+| `predict.py`: figures with difference overlays (Figures 2-3) | 690027 | `a100-7` | `bb98a72` | 24 Oct 2026, 05:33-05:34 |
+| Training, Improved U-Net 2.5D (Section 6.4) | 690028 | `a100-7` | `bb98a72` | 24 Oct 2026, 05:34-05:55 |
+| `predict.py`: validation analysis of all three models | 696531 | `a100-9` | `bb98a72` | 25 Oct 2026, 22:28-22:30 |
+| Test, Improved U-Net 2.5D (secondary) | 697701 | `a100-9` | `bb98a72` | 26 Oct 2026, 04:48-04:49 |
+| `predict.py`: test analysis of all three models | 697982 | `a100-9` | `bb98a72` | 26 Oct 2026, 05:47-05:49 |
 
 ### Data and model storage
 
@@ -511,8 +575,10 @@ The commit log records the work as it happened. The main milestones were:
 | 22 Oct | `65b1b63` | Feasibility review added to the README; HD95 boundary analysis |
 | 22 Oct | `33bd8be` | Boundary analysis, dilemma answer and recommendation |
 | 23 Oct | `df8e3a0` | README reorganised into the final report; architecture figure |
-| 23 Oct | `775d8c1` | Future-work section (Section 6.5) with checked references |
-| 23 Oct | next commit | Related published work (PROMISE12, Rodrigues et al., Zhang et al.) and the exact metric definition |
+| 23 Oct | `775d8c1` | Future-work section (now Section 6.6) with checked references |
+| 23 Oct | `6552d29` | Related published work (PROMISE12, Rodrigues et al., Zhang et al.) and the exact metric definition |
+| 23 Oct | `bb98a72` | Optional 2.5D input, difference overlays in `predict.py`, validation-split analysis |
+| 26 Oct | next commit | Figures with difference overlays; 2.5D follow-up experiment with validation and secondary test results (Section 6.4) |
 
 ## 10. Acknowledgements and references
 
@@ -539,6 +605,7 @@ AI assistance (Anthropic Claude, through Claude Code) was used for the following
 - drafting `dataset.py`, `modules.py`, `metrics.py`, `train.py` and `predict.py`;
 - preparing the Rangpur environment-setup and Slurm job scripts (kept outside this repository);
 - drafting this documentation, including its reorganisation into the final report structure (23 October 2026);
+- suggesting, at the user's request for further experiments, the difference overlays and the 2.5D follow-up of Section 6.4, and drafting their code and pre-specified evaluation plan (23 October 2026; the user chose which to do);
 - writing the matplotlib script that draws the architecture diagram (Figure 1), kept outside this repository.
 
 The AI-suggested code was verified in four ways:
@@ -546,8 +613,9 @@ The AI-suggested code was verified in four ways:
 - running the data pipeline over every slice and comparing its counts with an independent audit;
 - tracing the architectures against the papers' text and Fig. 1;
 - comparing the metrics with an independent NumPy reference on synthetic data;
-- running synthetic end-to-end training/resume/test checks on CPU.
+- running synthetic end-to-end training/resume/test checks on random data (on CPU, and for the 2.5D option also on the local laptop GPU);
+- for the 2.5D option, checking on the local copy of the data, without any model, that the 2D samples are unchanged and that the neighbouring slices come from the right series.
 
-OpenAI Codex also assisted with the Colab execution guidance and the Colab T4 timing update (21 October 2026), using the console outputs supplied by the user. OpenAI ChatGPT suggested the papers behind the future-work directions in Section 6.5, and Perplexity suggested the related papers cited in Sections 6.1, 6.3 and 6.5 (Litjens et al., Rodrigues et al., Zhang et al.) (23 October 2026). Claude Code checked those references and the cited numbers against the papers and Crossref, arXiv, PMC and PMLR, and drafted the text. Claude Code summarised the Rangpur run files supplied by the user for the training, test, prediction and boundary-analysis results, and described the figures. It also drafted the answer to the research dilemma and the engineering recommendation, which the user reviewed. The HD95 code was checked against a NumPy brute-force reference on synthetic masks, and the figure files of the two `predict.py` runs were byte-compared locally. The architecture diagram was checked against the layer definitions in `modules.py`.
+OpenAI Codex also assisted with the Colab execution guidance and the Colab T4 timing update (21 October 2026), using the console outputs supplied by the user. OpenAI ChatGPT suggested the papers behind the future-work directions in Section 6.6, and Perplexity suggested the related papers cited in Sections 6.1, 6.3 and 6.6 (Litjens et al., Rodrigues et al., Zhang et al.) (23 October 2026). Claude Code checked those references and the cited numbers against the papers and Crossref, arXiv, PMC and PMLR, and drafted the text. Claude Code summarised the Rangpur run files supplied by the user for the training, test, prediction, boundary-analysis and 2.5D results, and described the figures. It also drafted the answer to the research dilemma and the engineering recommendation, which the user reviewed. The HD95 code was checked against a NumPy brute-force reference on synthetic masks, and the figure files of `predict.py` jobs 685612 and 685882 were byte-compared locally, as were the repository copies of Figures 2-3 with the job 690027 outputs. The architecture diagram was checked against the layer definitions in `modules.py`.
 
-All training, validation, test and prediction results (the Colab timing runs and the Rangpur jobs) come from runs the user executed. The AI did not train, evaluate or run inference with the reported models. It ran only local checks: the mask comparison, the dataset audit, the synthetic CPU checks on random data (including the HD95 reference check), a layer and parameter count of the untrained models, the byte-comparison of the `predict.py` figure files, and the script that draws Figure 1 (which builds no model). The AI derived summary figures such as gaps, counts and pixel medians from the result files the user supplied, and the derived per-series inference times in Section 6.2.
+All training, validation, test and prediction results (the Colab timing runs and the Rangpur jobs) come from runs the user executed. The AI did not train, evaluate or run inference with the reported models. It ran only local checks: the mask comparison, the dataset audit, the model-free data checks of the 2.5D option, the synthetic checks on random data (including the HD95 reference check), a layer and parameter count of the untrained models, the byte-comparison of the `predict.py` figure files, and the script that draws Figure 1 (which builds no model). The AI derived summary figures such as gaps, counts and pixel medians from the result files the user supplied, and the derived per-series inference times in Section 6.2.
